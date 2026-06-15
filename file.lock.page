@@ -1,0 +1,60 @@
+Menu="Utilities"
+Title="File Lock"
+Icon="lock"
+Tag="lock"
+---
+<?php
+/* file.lock.page — renders under Tools / Utilities in the Unraid webGUI. */
+require_once '/usr/local/emhttp/plugins/file.lock/include/common.php';
+$conf = filelock_config();
+$base = $conf['base'];
+// Unraid's webGUI wrapper has already parsed var.ini into the global $var;
+// prefer that token, falling back to a direct read if it isn't set.
+global $var;
+$csrf = $var['csrf_token'] ?? '';
+if ($csrf === '') {
+    $flvar = @parse_ini_file('/var/local/emhttp/var.ini');
+    $csrf  = $flvar['csrf_token'] ?? '';
+}
+?>
+
+<link rel="stylesheet" href="/plugins/file.lock/styles/file.lock.css">
+
+<div id="filelock-app"
+     data-base="<?=htmlspecialchars($base)?>"
+     data-csrf="<?=htmlspecialchars($csrf)?>">
+
+  <div class="fl-bar">
+    <button id="fl-up" class="fl-btn" title="Up one level">..</button>
+    <div id="fl-crumbs" class="fl-crumbs"></div>
+    <div class="fl-spacer"></div>
+    <button id="fl-lock"   class="fl-btn fl-lock"   disabled>Lock</button>
+    <button id="fl-unlock" class="fl-btn fl-unlock" disabled>Unlock</button>
+  </div>
+
+  <table class="fl-table">
+    <thead>
+      <tr>
+        <th class="fl-c-check"><input type="checkbox" id="fl-all"></th>
+        <th class="fl-c-name">Name</th>
+        <th class="fl-c-status">Status</th>
+      </tr>
+    </thead>
+    <tbody id="fl-list"></tbody>
+  </table>
+
+  <div id="fl-status" class="fl-msg"></div>
+
+  <details class="fl-settings">
+    <summary>Settings</summary>
+    <div class="fl-settings-body">
+      <label>Base Directory&nbsp;
+        <input type="text" id="fl-base" value="<?=htmlspecialchars($base)?>" size="40">
+      </label>
+      <button id="fl-save" class="fl-btn">Save</button>
+      <span class="fl-hint">The browser is sandboxed to this directory and below.</span>
+    </div>
+  </details>
+</div>
+
+<script src="/plugins/file.lock/js/file.lock.js"></script>

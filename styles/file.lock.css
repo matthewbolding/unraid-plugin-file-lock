@@ -1,0 +1,62 @@
+/* file.lock.css — kept theme-neutral so it sits well in both Unraid themes. */
+
+#filelock-app { max-width: 1200px; }
+
+.fl-bar {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 10px; flex-wrap: wrap;
+}
+.fl-spacer { flex: 1 1 auto; }
+
+.fl-btn {
+  cursor: pointer; padding: 5px 12px; border-radius: 4px;
+  white-space: nowrap; line-height: 1.4;
+  border: 1px solid rgba(128,128,128,.4); background: rgba(128,128,128,.08);
+}
+.fl-btn:disabled { opacity: .45; cursor: default; }
+/* Fixed width so the "(n)" count never resizes the button or wraps the bar. */
+.fl-lock, .fl-unlock { min-width: 96px; text-align: center; }
+.fl-lock:not(:disabled)   { border-color: #2e7d32; color: #2e7d32; }
+.fl-unlock:not(:disabled) { border-color: #c62828; color: #c62828; }
+
+.fl-crumbs { font-size: 14px; }
+.fl-crumbs a { text-decoration: none; }
+.fl-crumbs a:hover { text-decoration: underline; }
+
+.fl-table { width: 100%; border-collapse: collapse; }
+.fl-table th, .fl-table td {
+  text-align: left; padding: 6px 10px;
+  border-bottom: 1px solid rgba(128,128,128,.18);
+}
+.fl-c-check  { width: 34px; }
+.fl-c-status { width: 120px; }
+
+.fl-row:hover { background: rgba(128,128,128,.08); }
+.fl-row.fl-selected { background: rgba(33,150,243,.14); }
+
+.fl-icon { margin-right: 6px; }
+.fl-dir a { font-weight: 600; text-decoration: none; }
+.fl-dir a:hover { text-decoration: underline; }
+
+/* Locked = green, unlocked = red, applied to the whole row's name colour. */
+.fl-is-locked   .fl-c-name { color: #2e7d32; }
+.fl-is-unlocked .fl-c-name { color: #c62828; }
+
+.fl-badge {
+  display: inline-block; padding: 2px 8px; border-radius: 10px;
+  font-size: 12px; font-weight: 600;
+}
+.fl-locked   { background: #2e7d32; color: #fff; }
+.fl-unlocked { background: #c62828; color: #fff; }
+.fl-neutral  { background: rgba(128,128,128,.25); }
+
+.fl-empty { text-align: center; opacity: .6; padding: 16px; }
+
+.fl-msg { margin-top: 10px; min-height: 18px; font-size: 13px; }
+.fl-msg-ok  { color: #2e7d32; }
+.fl-msg-err { color: #c62828; }
+
+.fl-settings { margin-top: 18px; font-size: 13px; }
+.fl-settings summary { cursor: pointer; opacity: .8; }
+.fl-settings-body { padding: 10px 4px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.fl-hint { opacity: .6; }
