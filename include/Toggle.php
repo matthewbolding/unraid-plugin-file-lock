@@ -23,9 +23,10 @@ if (!in_array($action, ['lock', 'unlock'], true) || !is_array($paths)) {
 $flag = $action === 'lock' ? '+i' : '-i';
 
 $results = [];
+$jobs    = []; // fused file path => disk path, resolved files waiting for chattr
 
-/** Apply the flag to a single fused file path. */
-$applyFile = function (string $fused) use (&$results, $flag, $base) {
+/** Resolve a single fused file path to its disk path, or record why it can't be done. */
+$prepareFile = function (string $fused) use (&$results, &$jobs, $base) {
     $safe = PathResolver::within($fused, $base);
     if ($safe === false) {
         $results[] = ['path' => $fused, 'ok' => false, 'msg' => 'outside base directory'];
@@ -36,9 +37,7 @@ $applyFile = function (string $fused) use (&$results, $flag, $base) {
         $results[] = ['path' => $fused, 'ok' => false, 'msg' => 'file not found on any disk'];
         return;
     }
-    $out = []; $rc = 0;
-    exec('chattr ' . $flag . ' -- ' . escapeshellarg($disk) . ' 2>&1', $out, $rc);
-    $results[] = ['path' => $fused, 'ok' => ($rc === 0), 'msg' => $rc === 0 ? '' : implode(' ', $out)];
+    $jobs[$fused] = $disk;
 };
 
 foreach ($paths as $p) {
@@ -62,10 +61,31 @@ foreach ($paths as $p) {
         $filter  = new RecursiveCallbackFilterIterator($dirIter, fn($cur) => !$cur->isLink());
         $it = new RecursiveIteratorIterator($filter);
         foreach ($it as $f) {
-            if ($f->isFile()) $applyFile($f->getPathname());
+            if ($f->isFile()) $prepareFile($f->getPathname());
         }
     } else {
-        $applyFile($safe);
+        $prepareFile($safe);
+    }
+}
+
+// Apply the flag in batches -- a handful of chattr subprocesses instead of
+// one per file. If a batch as a whole fails (e.g. one bad path in it), fall
+// back to running that batch's members individually so one bad file doesn't
+// mark the rest as failed too.
+foreach (array_chunk($jobs, PathResolver::BATCH_SIZE, true) as $chunk) {
+    $args = implode(' ', array_map('escapeshellarg', $chunk));
+    $out = []; $rc = 0;
+    exec("chattr $flag -- $args 2>&1", $out, $rc);
+    if ($rc === 0) {
+        foreach ($chunk as $fused => $disk) {
+            $results[] = ['path' => $fused, 'ok' => true, 'msg' => ''];
+        }
+        continue;
+    }
+    foreach ($chunk as $fused => $disk) {
+        $out2 = []; $rc2 = 0;
+        exec('chattr ' . $flag . ' -- ' . escapeshellarg($disk) . ' 2>&1', $out2, $rc2);
+        $results[] = ['path' => $fused, 'ok' => ($rc2 === 0), 'msg' => $rc2 === 0 ? '' : implode(' ', $out2)];
     }
 }
 

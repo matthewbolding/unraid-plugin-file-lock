@@ -28,6 +28,9 @@ if ($csrf === '') {
     <button id="fl-up" class="fl-btn" title="Up one level">..</button>
     <div id="fl-crumbs" class="fl-crumbs"></div>
     <div class="fl-spacer"></div>
+    <input type="text" id="fl-search" class="fl-search-input"
+           placeholder="Search this folder and below&hellip;">
+    <button id="fl-search-clear" class="fl-btn" hidden>Clear</button>
     <button id="fl-lock"   class="fl-btn fl-lock"   disabled>Lock</button>
     <button id="fl-unlock" class="fl-btn fl-unlock" disabled>Unlock</button>
   </div>

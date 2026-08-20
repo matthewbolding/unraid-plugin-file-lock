@@ -10,6 +10,13 @@ require_once __DIR__ . '/common.php';
 
 $base = PathResolver::clean($_POST['base'] ?? '/mnt/user');
 
+// The whole app's safety model is "sandboxed to base and below", so the base
+// itself must live under /mnt (array disks, pools, user shares) -- anything
+// else would defeat the sandbox rather than define it.
+if (strpos($base, '/mnt/') !== 0) {
+    filelock_json(['ok' => false, 'msg' => 'Base directory must be under /mnt']);
+}
+
 if (!is_dir($base)) {
     filelock_json(['ok' => false, 'msg' => 'Directory does not exist: ' . $base]);
 }

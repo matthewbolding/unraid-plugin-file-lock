@@ -30,6 +30,7 @@ FILES = [
     ("include/common.php",       f"{DEST}/include/common.php"),
     ("include/Browse.php",       f"{DEST}/include/Browse.php"),
     ("include/Toggle.php",       f"{DEST}/include/Toggle.php"),
+    ("include/Search.php",       f"{DEST}/include/Search.php"),
     ("include/Settings.php",     f"{DEST}/include/Settings.php"),
     ("file.lock.page",           f"{DEST}/file.lock.page"),
     ("js/file.lock.js",          f"{DEST}/js/file.lock.js"),

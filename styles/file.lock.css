@@ -23,6 +23,16 @@
 .fl-crumbs a { text-decoration: none; }
 .fl-crumbs a:hover { text-decoration: underline; }
 
+.fl-search-input {
+  padding: 5px 10px; border-radius: 4px; min-width: 220px;
+  border: 1px solid rgba(128,128,128,.4); background: rgba(128,128,128,.06);
+}
+
+.fl-path-hint {
+  font-size: 12px; opacity: .6; cursor: pointer; margin-top: 1px;
+}
+.fl-path-hint:hover { text-decoration: underline; }
+
 .fl-table { width: 100%; border-collapse: collapse; }
 .fl-table th, .fl-table td {
   text-align: left; padding: 6px 10px;

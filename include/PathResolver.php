@@ -127,17 +127,42 @@ class PathResolver {
         return false;
     }
 
+    /** Max paths per lsattr/chattr subprocess call, well under a typical ARG_MAX. */
+    const BATCH_SIZE = 200;
+
     /**
      * Read the immutable flag of a physical path via lsattr.
      * Returns true (locked), false (unlocked), or null (couldn't determine,
      * e.g. filesystem doesn't support attributes).
      */
     public static function isImmutable(string $diskPath) {
-        $out = []; $rc = 0;
-        exec('lsattr -d -- ' . escapeshellarg($diskPath) . ' 2>/dev/null', $out, $rc);
-        if ($rc !== 0 || !isset($out[0])) return null;
-        // Output looks like: "----i---------e----- /mnt/disk1/share/file.jpg"
-        $flags = preg_split('/\s+/', trim($out[0]))[0];
-        return strpos($flags, 'i') !== false;
+        return self::isImmutableBatch([$diskPath])[$diskPath] ?? null;
+    }
+
+    /**
+     * Read the immutable flag of many physical paths at once: a handful of
+     * `lsattr` subprocesses (chunked to stay under ARG_MAX) instead of one
+     * per path, which matters once a directory has hundreds of files.
+     *
+     * Returns [diskPath => true|false|null], null meaning the filesystem
+     * couldn't report attributes for that path (lsattr omits it from output
+     * rather than failing the whole batch).
+     */
+    public static function isImmutableBatch(array $diskPaths): array {
+        $status = [];
+        foreach (array_unique($diskPaths) as $p) $status[$p] = null;
+        if (!$status) return $status;
+
+        foreach (array_chunk(array_keys($status), self::BATCH_SIZE) as $chunk) {
+            $args = implode(' ', array_map('escapeshellarg', $chunk));
+            $out = []; $rc = 0;
+            exec("lsattr -d -- $args 2>/dev/null", $out, $rc);
+            foreach ($out as $line) {
+                // Output per path looks like: "----i---------e----- /mnt/disk1/share/file.jpg"
+                if (!preg_match('/^(\S+)\s+(.*)$/', $line, $m)) continue;
+                $status[$m[2]] = strpos($m[1], 'i') !== false;
+            }
+        }
+        return $status;
     }
 }

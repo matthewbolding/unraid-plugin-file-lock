@@ -22,6 +22,7 @@ $dh = @opendir($path);
 if ($dh === false)    filelock_json(['error' => 'Cannot open directory']);
 
 $entries = [];
+$disks   = []; // fused file path => disk path, resolved after the listing loop
 while (($name = readdir($dh)) !== false) {
     if ($name === '.' || $name === '..') continue;
     $full  = rtrim($path, '/') . '/' . $name;
@@ -30,17 +31,21 @@ while (($name = readdir($dh)) !== false) {
     // (chattr follows a symlink to its target) would escape the sandbox.
     if (is_link($full)) continue;
     $isDir = is_dir($full);
-    $entry = ['name' => $name, 'path' => $full, 'dir' => $isDir, 'locked' => null];
+    $entries[] = ['name' => $name, 'path' => $full, 'dir' => $isDir, 'locked' => null];
 
     if (!$isDir) {
         $disk = PathResolver::toDisk($full);
-        if ($disk !== false) {
-            $entry['locked'] = PathResolver::isImmutable($disk);
-        }
+        if ($disk !== false) $disks[$full] = $disk;
     }
-    $entries[] = $entry;
 }
 closedir($dh);
+
+// One batched lsattr call for every file's status instead of one per file.
+$status = PathResolver::isImmutableBatch(array_values($disks));
+foreach ($entries as &$e) {
+    if (isset($disks[$e['path']])) $e['locked'] = $status[$disks[$e['path']]] ?? null;
+}
+unset($e);
 
 // Folders first, then files, each alphabetical (case-insensitive).
 usort($entries, function ($a, $b) {
