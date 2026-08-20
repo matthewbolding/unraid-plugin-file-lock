@@ -1,118 +1,137 @@
 # File Lock — Unraid plugin
 
-A GUI to apply/remove the immutable flag (`chattr +i` / `chattr -i`) on files.
-The browser shows **fused** paths (`/mnt/user/...`); the backend resolves each
-file to its **physical** disk path (`/mnt/disk2/...`) before running `chattr`,
-because the shfs FUSE layer doesn't support the attribute ioctls.
+A webGUI page to apply or remove the immutable flag (`chattr +i` / `chattr -i`)
+on files, from a browser, without dropping to a terminal.
 
 - **Green / "locked"** = immutable (`+i`)
 - **Red / "unlocked"** = mutable (`-i`)
-- Folders navigate on click; the checkbox selects. Selecting a **folder** and
-  hitting Lock/Unlock applies the flag to **every file inside it, recursively**
-  (directories themselves can't be made immutable).
+- Click a folder to navigate into it; click the checkbox to select it. Selecting
+  a **folder** and hitting Lock/Unlock applies the flag to **every file inside
+  it, recursively** (directories themselves can't be made immutable).
 - The browser is sandboxed to a configurable **base directory** and below.
 
-## Files
+The webGUI shows **fused** paths (`/mnt/user/...`); the backend resolves each
+file to its **physical** disk path (`/mnt/disk2/...`, `/mnt/cache/...`) before
+running `chattr`, because the shfs FUSE layer that presents `/mnt/user` doesn't
+implement the ioctls `chattr`/`lsattr` need.
+
+## Layout
 
 ```
 file.lock/
-├── file.lock.page              webGUI page (appears under Tools → File Lock)
+├── file.lock.page              webGUI page (Tools → File Lock)
 ├── include/
-│   ├── PathResolver.php         fused<->disk mapping + immutable check
-│   ├── common.php               config loader + CSRF guard
+│   ├── PathResolver.php         fused <-> disk path mapping + immutable check
+│   ├── common.php               config loader
 │   ├── Browse.php               directory listing endpoint
 │   ├── Toggle.php               lock/unlock endpoint
 │   └── Settings.php             save base directory
-├── js/file.lock.js             front-end
+├── js/file.lock.js             front end
 └── styles/file.lock.css        styling
 ```
 
-`file.lock.plg` is a self-contained installer that writes all of the above
-inline — no GitHub or `.txz` hosting required.
+`build.py` inlines all of the above into a single self-contained `file.lock.plg`
+installer — no GitHub releases or hosted `.txz` package required.
 
----
+## Requirements
 
-## Deploy — Option A: live development (fast iteration)
+`chattr +i` works on XFS, BTRFS, and ZFS (the typical Unraid array/pool
+filesystems). It does **not** work on FAT/exFAT — files there show status
+**n/a**.
 
-The plugins directory lives in RAM (`/usr/local/emhttp/plugins`), so edits show
-up on a browser refresh but are **lost on reboot**. Great for iterating, then
-bake the result into the `.plg` (Option B) for persistence.
+## Install
 
-1. Put `file.lock-source.tar.gz` somewhere on the server (e.g. a share).
-2. Extract it into the plugins dir:
+1. Build the installer from source:
    ```bash
-   tar -xzf file.lock-source.tar.gz -C /usr/local/emhttp/plugins/
-   chmod -R 755 /usr/local/emhttp/plugins/file.lock
-   mkdir -p /boot/config/plugins/file.lock
-   [ -f /boot/config/plugins/file.lock/file.lock.cfg ] || \
-     echo 'BASEDIR="/mnt/user"' > /boot/config/plugins/file.lock/file.lock.cfg
+   python3 build.py file.lock file.lock.plg
    ```
-3. Open the webGUI -> **Tools -> File Lock**. Edit files in place and refresh.
+2. Copy `file.lock.plg` to `/boot/config/plugins/` on the flash drive.
+3. Install it — either in the webGUI (**Plugins → Install Plugin**, paste
+   `/boot/config/plugins/file.lock.plg`) or from a terminal:
+   ```bash
+   plugin install /boot/config/plugins/file.lock.plg
+   ```
 
-> If it doesn't appear under Tools, hard-refresh the webGUI. The location is set
-> by `Menu="Utilities"` at the top of `file.lock.page` — change it if you'd
-> rather it live elsewhere.
+Unraid re-runs every `.plg` on `/boot/config/plugins/` on each boot, which
+rewrites the plugin's files from the `.plg`'s inline copies — that's what makes
+the install persist across reboots. Your saved base directory
+(`/boot/config/plugins/file.lock/file.lock.cfg`) is written once and never
+overwritten by a later install, so it survives too.
 
-## Deploy — Option B: persistent install (survives reboot)
+## Updating
 
-1. Copy `file.lock.plg` to `/boot/config/plugins/` on the server (the flash drive).
-2. In the webGUI: **Plugins -> Install Plugin**, paste the path
-   `/boot/config/plugins/file.lock.plg`, and Install. (Or from a terminal:
-   `plugin install /boot/config/plugins/file.lock.plg`.)
-3. On every boot Unraid re-runs the `.plg`, which rewrites the files from the
-   inline blocks. Your saved base directory in
-   `/boot/config/plugins/file.lock/file.lock.cfg` is preserved.
+Rebuild and reinstall over the top — no need to remove first:
 
-To **uninstall**: Plugins -> File Lock -> Remove (your saved base-dir config is
-kept; delete `/boot/config/plugins/file.lock/` by hand if you want it gone too).
+```bash
+python3 build.py file.lock file.lock.plg
+cp file.lock.plg /boot/config/plugins/file.lock.plg
+plugin install /boot/config/plugins/file.lock.plg
+```
 
-### Rebuilding the .plg after edits
+`build.py` stamps the plugin version from today's date, so every rebuild is
+automatically newer than what's installed. There's no hosted release feed, so
+the Plugins page won't show an automatic "update available" prompt — updating
+is always this manual rebuild-and-reinstall.
 
-The `.plg` is generated from the source tree by `build_plg.py`. After editing
-source files, re-run it to regenerate a fresh inline installer.
+## Uninstall
 
----
+**Plugins → File Lock → Remove**. This deletes the plugin's code but leaves
+`/boot/config/plugins/file.lock/file.lock.cfg` (your saved base directory) in
+place; delete that by hand if you want it gone too.
 
-## Should I use the VS Code community app?
+## Developing
 
-Yes — it's the fastest way to iterate. The LinuxServer **code-server**
-container in Community Applications is actively maintained and gives you a full
-VS Code in the browser.
+The live plugins directory (`/usr/local/emhttp/plugins`) lives in RAM, so
+edits there show up on a browser refresh but are lost on reboot — good for
+fast iteration, then bake the result into the `.plg` for persistence:
 
-One catch: by default the container only sees the paths you map into it. To
-edit the live plugin, add a volume mapping for `/usr/local/emhttp/plugins`
-(host) -> some path in the container, then edit there and refresh the webGUI.
-Editing the source on a share + running the Option-A extract command is often
-cleaner than mapping the RAM plugins dir directly.
+```bash
+tar -xzf file.lock-source.tar.gz -C /usr/local/emhttp/plugins/
+chmod -R 755 /usr/local/emhttp/plugins/file.lock
+```
 
----
+Then open **Tools → File Lock** in the webGUI and hard-refresh after each edit.
+If you're editing over a code-server / VS Code container, map
+`/usr/local/emhttp/plugins` into it, or edit on a share and re-run the extract
+command above.
 
-## Caveats worth knowing
+## Caveats
 
-- **Filesystem support:** `chattr +i` works on XFS, BTRFS, and ZFS (typical
-  Unraid array/pool filesystems). It does **not** work on FAT/exFAT. Files whose
-  filesystem can't report attributes show status **n/a**.
-- **Mover interaction:** an immutable file sitting on a cache/pool can't be moved
-  or deleted until you remove `+i`. If you lock files on cache, mover will skip
-  them. Lock files that already live on the array if you want mover to behave.
-- **Immutable is absolute:** while `+i` is set, *nothing* — not root, not Docker,
-  not SMB clients — can modify, rename, or delete the file. That's the point, but
-  it also means an app trying to write a locked file will get permission errors.
-- **Recursive folder ops** can be slow on very large photo trees (one
-  resolve + `chattr` per file). A huge recursive job could hit PHP's execution
-  time limit; if your libraries are massive, consider locking per-subfolder, or
-  ask me to add chunked/background processing.
-- **Access control:** anyone who can reach the Unraid webGUI can lock/unlock
-  within the base directory. The base-dir sandbox + path-traversal guard keep it
-  from wandering outside that root, but it's not per-user.
+- **Mover interaction:** an immutable file on cache/pool storage can't be moved
+  or deleted until `+i` is removed. Mover will silently skip locked files —
+  lock files that already live on the array if you want mover to behave
+  normally.
+- **Immutable is absolute:** while `+i` is set, nothing — not root, not
+  Docker, not SMB clients — can modify, rename, or delete the file. That's the
+  point, but any app trying to write to a locked file will get a permission
+  error.
+- **Recursive folder operations** do one disk-resolution + `chattr` per file
+  and can be slow on large trees; a very large job can hit PHP's execution
+  time limit. See "Known issues" below.
+- **Access control** is not per-user: anyone who can reach the webGUI can
+  lock/unlock anything within the configured base directory.
 - **Hardlinks:** `+i` is an inode attribute, so every hardlink to a file
   reflects the same locked state.
 
-## Ideas you might want next
+## Known issues / roadmap
 
-- A one-click **"lock entire current folder"** button.
+- **Performance:** disk-path resolution (`PathResolver::toDisk()`) re-globs
+  `/mnt` and probes every disk with `file_exists()` for *each file
+  individually*. On Unraid this can wake spun-down array disks repeatedly.
+  Should resolve once per directory (scan each candidate disk's copy of the
+  directory, build a name→disk map) instead of once per file, and batch
+  `lsattr`/`chattr` calls instead of one subprocess per file.
+- **Symlinks aren't excluded** from directory listings or the recursive
+  walk in `Toggle.php`, so a symlink under the base directory pointing outside
+  it could be browsed into or recursively locked. Should skip `is_link()`
+  entries (or resolve and re-validate `realpath()`) in `Browse.php` and
+  `Toggle.php`.
+- **`Settings.php` doesn't restrict the base directory to `/mnt`** — any
+  existing path is accepted, which weakens the sandbox model. Should require
+  the new base to start with `/mnt/`.
+- **Search:** no way to find a file across the whole base directory today;
+  only per-folder browsing. A `Search.php` endpoint (recursive substring match,
+  capped result count, same base/symlink guards) is a natural addition.
 - A confirm step on bulk **unlock** (the protection-removing direction).
-- Show the resolved physical disk path as a row tooltip for debugging.
 - Batch `lsattr` per directory instead of per file, to speed up listings of
-  folders with thousands of photos.
-# unraid-plugin-file-lock
+  folders with thousands of items (folded into the performance item above).
