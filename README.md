@@ -60,22 +60,32 @@ overwritten by a later install, so it survives too.
 
 ## Updating
 
-Rebuild and reinstall over the top — no need to remove first:
+Rebuild, then **remove before reinstalling** — Unraid's `plugin install`
+compares the install source *path*, not file content, and always installs
+from the same fixed path (`/boot/config/plugins/file.lock.plg`). So a plain
+overwrite-and-reinstall is silently ignored ("not re-installing same
+plugin"), `forced` included — that flag only affects a version-downgrade
+check that never gets reached here:
 
 ```bash
 python3 build.py file.lock file.lock.plg
+plugin remove file.lock.plg          # note: the registered name includes .plg
 cp file.lock.plg /boot/config/plugins/file.lock.plg
 plugin install /boot/config/plugins/file.lock.plg
 ```
 
 `build.py` stamps the plugin version from today's date, so every rebuild is
-automatically newer than what's installed. There's no hosted release feed, so
-the Plugins page won't show an automatic "update available" prompt — updating
-is always this manual rebuild-and-reinstall.
+automatically newer than what's installed — that just doesn't matter for the
+same-path check above. There's no hosted release feed, so the Plugins page
+won't show an automatic "update available" prompt — updating is always this
+manual rebuild → remove → reinstall.
 
 ## Uninstall
 
-**Plugins → File Lock → Remove**. This deletes the plugin's code but leaves
+**Plugins → File Lock → Remove**, or from a terminal `plugin remove
+file.lock.plg` (the registered name includes the `.plg` extension — `plugin
+remove file.lock` silently no-ops, reporting success without removing
+anything). Either way this deletes the plugin's code but leaves
 `/boot/config/plugins/file.lock/file.lock.cfg` (your saved base directory) in
 place; delete that by hand if you want it gone too.
 
@@ -105,8 +115,8 @@ command above.
   Docker, not SMB clients — can modify, rename, or delete the file. That's the
   point, but any app trying to write to a locked file will get a permission
   error.
-- **Recursive folder operations** do one disk-resolution + `chattr` per file
-  and can be slow on large trees; a very large job can hit PHP's execution
+- **Recursive folder operations** do one `chattr` subprocess per file and can
+  be slow on very large trees; a large enough job can hit PHP's execution
   time limit. See "Known issues" below.
 - **Access control** is not per-user: anyone who can reach the webGUI can
   lock/unlock anything within the configured base directory.
@@ -115,23 +125,37 @@ command above.
 
 ## Known issues / roadmap
 
-- **Performance:** disk-path resolution (`PathResolver::toDisk()`) re-globs
-  `/mnt` and probes every disk with `file_exists()` for *each file
-  individually*. On Unraid this can wake spun-down array disks repeatedly.
-  Should resolve once per directory (scan each candidate disk's copy of the
-  directory, build a name→disk map) instead of once per file, and batch
-  `lsattr`/`chattr` calls instead of one subprocess per file.
-- **Symlinks aren't excluded** from directory listings or the recursive
-  walk in `Toggle.php`, so a symlink under the base directory pointing outside
-  it could be browsed into or recursively locked. Should skip `is_link()`
-  entries (or resolve and re-validate `realpath()`) in `Browse.php` and
-  `Toggle.php`.
 - **`Settings.php` doesn't restrict the base directory to `/mnt`** — any
   existing path is accepted, which weakens the sandbox model. Should require
   the new base to start with `/mnt/`.
 - **Search:** no way to find a file across the whole base directory today;
   only per-folder browsing. A `Search.php` endpoint (recursive substring match,
-  capped result count, same base/symlink guards) is a natural addition.
+  capped result count, same base/symlink guards as `Browse.php`/`Toggle.php`)
+  is a natural addition.
 - A confirm step on bulk **unlock** (the protection-removing direction).
-- Batch `lsattr` per directory instead of per file, to speed up listings of
-  folders with thousands of items (folded into the performance item above).
+- **`lsattr`/`chattr` are still one subprocess per file** in `Browse.php` and
+  `Toggle.php`. Disk-path resolution is now batched per directory (see below),
+  but the attribute read/write itself isn't — batching `lsattr -d -- f1 f2 ...`
+  / `chattr +i -- f1 f2 ...` in chunks would cut fork/exec overhead further on
+  large trees.
+
+### Fixed
+
+- ~~Disk-path resolution (`PathResolver::toDisk()`) re-globbed `/mnt` and
+  probed every disk with `file_exists()` for each file individually, which on
+  Unraid could wake spun-down array disks repeatedly.~~ Now resolves once per
+  directory (`PathResolver::resolveDir()` scans each candidate disk's copy of
+  the directory and builds a name→disk map), with `diskRoots()` itself cached
+  per request.
+- ~~Symlinks weren't excluded from directory listings or the recursive walk in
+  `Toggle.php`~~, so a symlink under the base directory pointing outside it
+  could be browsed into, or — since `chattr` opens its target through a
+  symlink — recursively locked outside the sandbox. `Browse.php` now skips
+  symlinks entirely, and `Toggle.php` rejects a directly-selected symlink and
+  filters symlinks out of the recursive walk (`RecursiveCallbackFilterIterator`)
+  so a symlinked subdirectory can't be traversed either.
+- `build.py`'s generated removal `<FILE>` block was missing `Run="/bin/bash"`,
+  so `plugin remove` reported success without actually deleting the deployed
+  plugin directory — Unraid only executes a block's `INLINE` content when
+  `Run=` is present; otherwise it just writes the script text to `Name` and
+  stops.

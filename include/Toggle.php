@@ -47,11 +47,20 @@ foreach ($paths as $p) {
         $results[] = ['path' => $p, 'ok' => false, 'msg' => 'outside base directory'];
         continue;
     }
+    // chattr opens its target through a symlink, so locking a symlink would
+    // actually flag whatever it points at — possibly outside the sandbox.
+    if (is_link($safe)) {
+        $results[] = ['path' => $p, 'ok' => false, 'msg' => 'symlinks are not followed'];
+        continue;
+    }
     if (is_dir($safe)) {
-        // Recurse into the directory and flag every regular file.
-        $it = new RecursiveIteratorIterator(
-            new RecursiveDirectoryIterator($safe, FilesystemIterator::SKIP_DOTS)
-        );
+        // Recurse into the directory and flag every regular file. The filter
+        // excludes symlinks from both the walk and recursion, so a symlinked
+        // subdirectory can't be used to walk outside the sandbox and a
+        // symlinked file can't be used to chattr its target.
+        $dirIter = new RecursiveDirectoryIterator($safe, FilesystemIterator::SKIP_DOTS);
+        $filter  = new RecursiveCallbackFilterIterator($dirIter, fn($cur) => !$cur->isLink());
+        $it = new RecursiveIteratorIterator($filter);
         foreach ($it as $f) {
             if ($f->isFile()) $applyFile($f->getPathname());
         }

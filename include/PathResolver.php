@@ -15,11 +15,16 @@ class PathResolver {
     /** Directory names directly under /mnt that are NOT array disks or pools. */
     const RESERVED = ['user', 'user0', 'disks', 'remotes', 'addons', 'rootshare'];
 
+    /** Per-request cache for diskRoots(), which is otherwise re-globbed constantly. */
+    private static ?array $diskRootsCache = null;
+
     /**
      * Physical mount roots that can back a user share: array disks + pools.
      * e.g. ['/mnt/disk1', '/mnt/disk2', '/mnt/cache'].
      */
     public static function diskRoots(): array {
+        if (self::$diskRootsCache !== null) return self::$diskRootsCache;
+
         $roots = [];
 
         // Array data disks: /mnt/disk1, /mnt/disk2, ...
@@ -36,13 +41,49 @@ class PathResolver {
             $roots[] = $m;
         }
 
-        return $roots;
+        return self::$diskRootsCache = $roots;
+    }
+
+    /** Per-request cache for resolveDir(): fused directory -> [filename => diskPath]. */
+    private static array $dirCache = [];
+
+    /**
+     * Resolve every entry directly inside a fused directory to its physical
+     * disk path in one pass: scan each disk's copy of the directory once
+     * (readdir), instead of probing every disk with file_exists() for each
+     * file individually. On Unraid this also avoids waking a spun-down disk
+     * once per file that isn't even on it.
+     *
+     * First disk found wins, matching the previous first-hit semantics of
+     * toDisk(). Result is cached per directory for the life of the request,
+     * since callers (e.g. Browse.php's per-entry lookup, or a recursive
+     * Toggle.php walk) commonly resolve many files from the same directory.
+     */
+    public static function resolveDir(string $fusedDir): array {
+        $fusedDir = self::clean($fusedDir);
+        if (isset(self::$dirCache[$fusedDir])) return self::$dirCache[$fusedDir];
+
+        $map = [];
+        if (preg_match('#^/mnt/user0?/(.*)$#', $fusedDir, $m)) {
+            $rel = $m[1];
+            foreach (self::diskRoots() as $root) {
+                $cand = $rel === '' ? $root : $root . '/' . $rel;
+                if (!is_dir($cand)) continue;
+                $dh = @opendir($cand);
+                if ($dh === false) continue;
+                while (($name = readdir($dh)) !== false) {
+                    if ($name === '.' || $name === '..') continue;
+                    if (!isset($map[$name])) $map[$name] = $cand . '/' . $name;
+                }
+                closedir($dh);
+            }
+        }
+        return self::$dirCache[$fusedDir] = $map;
     }
 
     /**
-     * Convert a fused path to the physical disk path that actually holds it.
-     * A regular file lives on exactly one disk, so we test each root for the
-     * exact path and return the first hit. Returns false if not found.
+     * Convert a fused path to the physical disk path that actually holds it,
+     * via the directory-level cache above. Returns false if not found.
      *
      * If the path isn't a /mnt/user(0) path it's assumed to already be physical
      * and is returned unchanged.
@@ -50,16 +91,12 @@ class PathResolver {
     public static function toDisk(string $fused) {
         $fused = self::clean($fused);
 
-        if (!preg_match('#^/mnt/user0?/(.+)$#', $fused, $m)) {
+        if (!preg_match('#^/mnt/user0?/(.+)$#', $fused)) {
             return $fused; // not a user-share path; treat as already physical
         }
-        $rel = $m[1];
 
-        foreach (self::diskRoots() as $root) {
-            $cand = $root . '/' . $rel;
-            if (file_exists($cand)) return $cand;
-        }
-        return false;
+        $map = self::resolveDir(dirname($fused));
+        return $map[basename($fused)] ?? false;
     }
 
     /**

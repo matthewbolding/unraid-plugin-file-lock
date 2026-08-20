@@ -15,6 +15,7 @@ $base = $conf['base'];
 $path = $_POST['path'] ?? $base;
 $path = PathResolver::within($path, $base);
 if ($path === false)  filelock_json(['error' => 'Path is outside the base directory']);
+if (is_link($path))   filelock_json(['error' => 'Symlinks are not followed']);
 if (!is_dir($path))   filelock_json(['error' => 'Not a directory: ' . $path]);
 
 $dh = @opendir($path);
@@ -24,6 +25,10 @@ $entries = [];
 while (($name = readdir($dh)) !== false) {
     if ($name === '.' || $name === '..') continue;
     $full  = rtrim($path, '/') . '/' . $name;
+    // Symlinks aren't listed at all: a symlink under the base directory could
+    // point outside it, and both navigating into it and locking through it
+    // (chattr follows a symlink to its target) would escape the sandbox.
+    if (is_link($full)) continue;
     $isDir = is_dir($full);
     $entry = ['name' => $name, 'path' => $full, 'dir' => $isDir, 'locked' => null];
 

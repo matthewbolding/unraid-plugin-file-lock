@@ -62,7 +62,10 @@ echo ""
 ''')
 
 # Removal: drop the plugin code; keep the saved base-dir config.
-blocks.append(f'''<FILE Name="/tmp/{PLUGIN}-remove" Method="remove">
+# Run="/bin/bash" is required for the INLINE block to actually execute --
+# without it the plugin manager just writes the script text to Name and
+# never runs it, so "plugin remove" reports success but removes nothing.
+blocks.append(f'''<FILE Name="/tmp/{PLUGIN}-remove" Run="/bin/bash" Method="remove">
 <INLINE>
 rm -rf {DEST}
 rm -f /boot/config/plugins/{PLUGIN}.plg
