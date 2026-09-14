@@ -15,9 +15,15 @@
 }
 .fl-btn:disabled { opacity: .45; cursor: default; }
 /* Fixed width so the "(n)" count never resizes the button or wraps the bar. */
-.fl-lock, .fl-unlock { min-width: 96px; text-align: center; }
+.fl-lock, .fl-unlock, .fl-delete { min-width: 96px; text-align: center; }
 .fl-lock:not(:disabled)   { border-color: #2e7d32; color: #2e7d32; }
 .fl-unlock:not(:disabled) { border-color: #c62828; color: #c62828; }
+/* Filled, not just outlined, so Delete doesn't read as just another
+   lock/unlock toggle -- it's a destructive, irreversible action. */
+.fl-delete:not(:disabled) {
+  border-color: #b71c1c; background: #b71c1c; color: #fff;
+}
+.fl-delete:not(:disabled):hover { background: #8e1515; border-color: #8e1515; }
 
 .fl-crumbs { font-size: 14px; }
 .fl-crumbs a { text-decoration: none; }

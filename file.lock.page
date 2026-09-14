@@ -33,6 +33,7 @@ if ($csrf === '') {
     <button id="fl-search-clear" class="fl-btn" hidden>Clear</button>
     <button id="fl-lock"   class="fl-btn fl-lock"   disabled>Lock</button>
     <button id="fl-unlock" class="fl-btn fl-unlock" disabled>Unlock</button>
+    <button id="fl-delete" class="fl-btn fl-delete" disabled title="Remove the immutable flag, then permanently delete">Unlock &amp; Delete</button>
   </div>
 
   <table class="fl-table">

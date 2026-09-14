@@ -400,6 +400,114 @@ filelock_json(['action' => $action, 'results' => $results]);
 ]]>
 </INLINE>
 </FILE>
+<FILE Name="/usr/local/emhttp/plugins/file.lock/include/Delete.php">
+<INLINE>
+<![CDATA[<?php
+/**
+ * Delete.php — unlock (remove the immutable flag, if set) and permanently
+ * delete the selected files.
+ *
+ * POST: paths (JSON array of fused paths), csrf_token
+ * Returns JSON: { results:[{path,ok,msg}] }
+ *
+ * This is destructive and irreversible, unlike Toggle.php's lock/unlock.
+ * The front end gates the call behind an explicit confirm() prompt; this
+ * endpoint does not re-confirm anything itself (there is nothing meaningful
+ * to check server-side that isn't already covered by the normal CSRF/base-
+ * directory checks below), so it must never be wired up to fire without
+ * that prompt having already been shown and accepted.
+ *
+ * Directories cannot themselves be immutable and are never deleted here —
+ * only regular files, matching Toggle.php's recursive-into-a-folder
+ * semantics. A selected folder's contents are unlocked and deleted
+ * recursively; the (now possibly empty) folder itself is left in place.
+ */
+
+require_once __DIR__ . '/common.php';
+
+$conf = filelock_config();
+$base = $conf['base'];
+
+$paths = json_decode($_POST['paths'] ?? '[]', true);
+if (!is_array($paths)) {
+    filelock_json(['error' => 'Bad request']);
+}
+
+$results = [];
+$jobs    = []; // fused file path => disk path, resolved files waiting for unlock+delete
+
+/** Resolve a single fused file path to its disk path, or record why it can't be done. */
+$prepareFile = function (string $fused) use (&$results, &$jobs, $base) {
+    $safe = PathResolver::within($fused, $base);
+    if ($safe === false) {
+        $results[] = ['path' => $fused, 'ok' => false, 'msg' => 'outside base directory'];
+        return;
+    }
+    $disk = PathResolver::toDisk($safe);
+    if ($disk === false || !is_file($disk)) {
+        $results[] = ['path' => $fused, 'ok' => false, 'msg' => 'file not found on any disk'];
+        return;
+    }
+    $jobs[$fused] = $disk;
+};
+
+foreach ($paths as $p) {
+    $safe = PathResolver::within($p, $base);
+    if ($safe === false) {
+        $results[] = ['path' => $p, 'ok' => false, 'msg' => 'outside base directory'];
+        continue;
+    }
+    // Same symlink guard as Toggle.php: chattr/unlink would act on whatever
+    // the symlink points at, possibly outside the sandbox.
+    if (is_link($safe)) {
+        $results[] = ['path' => $p, 'ok' => false, 'msg' => 'symlinks are not followed'];
+        continue;
+    }
+    if (is_dir($safe)) {
+        $dirIter = new RecursiveDirectoryIterator($safe, FilesystemIterator::SKIP_DOTS);
+        $filter  = new RecursiveCallbackFilterIterator($dirIter, fn($cur) => !$cur->isLink());
+        $it = new RecursiveIteratorIterator($filter);
+        foreach ($it as $f) {
+            if ($f->isFile()) $prepareFile($f->getPathname());
+        }
+    } else {
+        $prepareFile($safe);
+    }
+}
+
+// Unlock every job first, in batches (same pattern as Toggle.php): an
+// immutable file can't be unlinked, and batching keeps this fast when
+// deleting many files at once. If a batch as a whole fails (e.g. one bad
+// path in it), fall back to unlocking that batch's members individually so
+// one bad file doesn't leave the rest immutable and un-deletable.
+foreach (array_chunk($jobs, PathResolver::BATCH_SIZE, true) as $chunk) {
+    $args = implode(' ', array_map('escapeshellarg', $chunk));
+    $out = []; $rc = 0;
+    exec("chattr -i -- $args 2>&1", $out, $rc);
+    if ($rc !== 0) {
+        foreach ($chunk as $disk) {
+            $out2 = []; $rc2 = 0;
+            exec('chattr -i -- ' . escapeshellarg($disk) . ' 2>&1', $out2, $rc2);
+        }
+    }
+}
+
+// Delete. unlink()'s own success/failure is the source of truth here — no
+// need to branch on the chattr result above, since a file that was never
+// immutable (or lives on a filesystem chattr doesn't support) still deletes
+// normally, and one that's still stuck immutable will simply fail here.
+foreach ($jobs as $fused => $disk) {
+    if (@unlink($disk)) {
+        $results[] = ['path' => $fused, 'ok' => true, 'msg' => ''];
+    } else {
+        $results[] = ['path' => $fused, 'ok' => false, 'msg' => 'delete failed'];
+    }
+}
+
+filelock_json(['results' => $results]);
+]]>
+</INLINE>
+</FILE>
 <FILE Name="/usr/local/emhttp/plugins/file.lock/include/Search.php">
 <INLINE>
 <![CDATA[<?php
@@ -549,6 +657,7 @@ if ($csrf === '') {
     <button id="fl-search-clear" class="fl-btn" hidden>Clear</button>
     <button id="fl-lock"   class="fl-btn fl-lock"   disabled>Lock</button>
     <button id="fl-unlock" class="fl-btn fl-unlock" disabled>Unlock</button>
+    <button id="fl-delete" class="fl-btn fl-delete" disabled title="Remove the immutable flag, then permanently delete">Unlock &amp; Delete</button>
   </div>
 
   <table class="fl-table">
@@ -600,6 +709,7 @@ if ($csrf === '') {
   const upBtn  = document.getElementById('fl-up');
   const lockBtn   = document.getElementById('fl-lock');
   const unlockBtn = document.getElementById('fl-unlock');
+  const deleteBtn = document.getElementById('fl-delete');
   const allBox = document.getElementById('fl-all');
   const status = document.getElementById('fl-status');
   const searchInput    = document.getElementById('fl-search');
@@ -627,9 +737,10 @@ if ($csrf === '') {
 
   function refreshButtons() {
     const n = selected.size;
-    lockBtn.disabled = unlockBtn.disabled = (n === 0);
+    lockBtn.disabled = unlockBtn.disabled = deleteBtn.disabled = (n === 0);
     lockBtn.textContent   = n ? `Lock (${n})`   : 'Lock';
     unlockBtn.textContent = n ? `Unlock (${n})` : 'Unlock';
+    deleteBtn.textContent = n ? `Unlock & Delete (${n})` : 'Unlock & Delete';
   }
 
   /* --- rendering ------------------------------------------------------- */
@@ -802,7 +913,7 @@ if ($csrf === '') {
   function apply(action) {
     if (!selected.size) return;
     const paths = JSON.stringify([...selected]);
-    lockBtn.disabled = unlockBtn.disabled = true;
+    lockBtn.disabled = unlockBtn.disabled = deleteBtn.disabled = true;
     setMsg('Working…');
     post('Toggle.php', { action, paths }).then(res => {
       if (res.error) { setMsg(res.error, 'err'); return; }
@@ -817,11 +928,43 @@ if ($csrf === '') {
     }).catch(() => setMsg('Operation failed', 'err'));
   }
 
+  /** Unlock and permanently delete every selected file. Destructive and
+   *  irreversible, so it's gated behind an explicit confirm() prompt --
+   *  this is a UX safety net against fat-fingering the button, not an
+   *  access control: anyone who can reach this page could already delete
+   *  these files locking/unlocking them manually. */
+  function doDelete() {
+    if (!selected.size) return;
+    const n = selected.size;
+    const ok = confirm(
+      `Permanently delete ${n} item(s)?\n\n` +
+      `This removes the immutable flag first, then deletes the file(s) ` +
+      `-- selected folders are deleted recursively. This cannot be undone.`
+    );
+    if (!ok) return;
+
+    const paths = JSON.stringify([...selected]);
+    lockBtn.disabled = unlockBtn.disabled = deleteBtn.disabled = true;
+    setMsg('Deleting…');
+    post('Delete.php', { paths }).then(res => {
+      if (res.error) { setMsg(res.error, 'err'); return; }
+      const fail = res.results.filter(r => !r.ok);
+      const done = res.results.length - fail.length;
+      if (fail.length) {
+        setMsg(`${done} deleted, ${fail.length} failed (e.g. ${fail[0].msg})`, 'err');
+      } else {
+        setMsg(`Deleted ${done} file(s).`, 'ok');
+      }
+      refresh();
+    }).catch(() => setMsg('Delete failed', 'err'));
+  }
+
   /* --- wire up --------------------------------------------------------- */
 
   upBtn.onclick     = () => { if (parent !== null) load(parent); };
   lockBtn.onclick   = () => apply('lock');
   unlockBtn.onclick = () => apply('unlock');
+  deleteBtn.onclick = doDelete;
 
   allBox.onchange = () => {
     list.querySelectorAll('input[type=checkbox]').forEach(cb => {
@@ -879,9 +1022,15 @@ if ($csrf === '') {
 }
 .fl-btn:disabled { opacity: .45; cursor: default; }
 /* Fixed width so the "(n)" count never resizes the button or wraps the bar. */
-.fl-lock, .fl-unlock { min-width: 96px; text-align: center; }
+.fl-lock, .fl-unlock, .fl-delete { min-width: 96px; text-align: center; }
 .fl-lock:not(:disabled)   { border-color: #2e7d32; color: #2e7d32; }
 .fl-unlock:not(:disabled) { border-color: #c62828; color: #c62828; }
+/* Filled, not just outlined, so Delete doesn't read as just another
+   lock/unlock toggle -- it's a destructive, irreversible action. */
+.fl-delete:not(:disabled) {
+  border-color: #b71c1c; background: #b71c1c; color: #fff;
+}
+.fl-delete:not(:disabled):hover { background: #8e1515; border-color: #8e1515; }
 
 .fl-crumbs { font-size: 14px; }
 .fl-crumbs a { text-decoration: none; }
