@@ -1,0 +1,28 @@
+<Plugin>
+  <!-- Required fields -->
+  <Name>file.lock</Name>
+
+  <Overview>
+    Lock and unlock individual files on your array or pools directly from the webGUI (Tools -> File Lock), without a terminal. Browse your shares, search by name, and toggle the immutable flag on files to protect them from accidental deletion or modification. Selecting a folder applies the flag recursively to every file inside it. Works on XFS, BTRFS, and ZFS.
+  </Overview>
+
+  <!-- Must match the pluginURL attribute in file.lock.plg exactly -->
+  <PluginURL>https://raw.githubusercontent.com/matthewbolding/unraid-plugin-file-lock/master/file.lock.plg</PluginURL>
+
+  <PluginAuthor>Matthew Bolding</PluginAuthor>
+
+  <!-- Optional entries -->
+
+  <Support>https://forums.unraid.net/topic/200587-plugin-file-lock/</Support>
+
+  <Project>https://github.com/matthewbolding/unraid-plugin-file-lock</Project>
+
+  <ReadMe>https://raw.githubusercontent.com/matthewbolding/unraid-plugin-file-lock/master/README.md</ReadMe>
+
+  <Category>Tools:Utilities</Category>
+
+  <License>MIT</License>
+
+  <!-- font awesome 4.7 icon name, no fa- prefix -->
+  <IconFA>lock</IconFA>
+</Plugin>

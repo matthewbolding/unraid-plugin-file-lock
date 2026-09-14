@@ -19,10 +19,11 @@ import os, sys, datetime
 SRC = sys.argv[1] if len(sys.argv) > 1 else "file.lock"
 OUT = sys.argv[2] if len(sys.argv) > 2 else "file.lock.plg"
 
-PLUGIN  = "file.lock"
-DEST    = f"/usr/local/emhttp/plugins/{PLUGIN}"
-VERSION = datetime.date.today().strftime("%Y.%m.%d")
-AUTHOR  = "Matthew Bolding"
+PLUGIN     = "file.lock"
+DEST       = f"/usr/local/emhttp/plugins/{PLUGIN}"
+VERSION    = datetime.date.today().strftime("%Y.%m.%d")
+AUTHOR     = "Matthew Bolding"
+PLUGIN_URL = f"https://raw.githubusercontent.com/matthewbolding/unraid-plugin-file-lock/master/{PLUGIN}.plg"
 
 # (path relative to SRC, absolute destination on the server)
 FILES = [
@@ -79,10 +80,11 @@ plg = f'''<?xml version='1.0' standalone='yes'?>
 <!ENTITY name      "{PLUGIN}">
 <!ENTITY author    "{AUTHOR}">
 <!ENTITY version   "{VERSION}">
+<!ENTITY pluginURL "{PLUGIN_URL}">
 <!ENTITY launch    "Tools/FileLock">
 ]>
 
-<PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;">
+<PLUGIN name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;" launch="&launch;">
 
 <CHANGES>
 ### {VERSION}
