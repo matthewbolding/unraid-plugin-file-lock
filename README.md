@@ -76,8 +76,8 @@ Then open **Tools → File Lock** in the webGUI and hard-refresh after each edit
 
 ## Caveats
 
-- **Mover interaction:** an immutable file on cache/pool storage can't be moved or deleted until `+i` is removed. Mover will silently skip locked files — lock files that already live on the array if you want mover to behave normally.
-- **Immutable is absolute:** while `+i` is set, nothing — not root, not Docker, not SMB clients — can modify, rename, or delete the file. That's the point, but any app trying to write to a locked file will get a permission error.
+- **Mover interaction:** an immutable file on cache or a pool storage can't be moved or deleted until `+i` is removed. The mover will therefore skip locked files.
+- **Immutable is absolute:** while `+i` is set no entity or user, including the root user, Docker, SMB clients, etc., can modify, rename, or delete the file. Any app trying to write to a locked file will likewise get a permission error.
 - **Recursive folder operations** batch `chattr` in chunks rather than one subprocess per file, but a large enough tree can still hit PHP's execution time limit. See "Known issues" below.
 - **Access control** is not per-user: anyone who can reach the webGUI can lock/unlock anything within the configured base directory.
 - **Hardlinks:** `+i` is an inode attribute, so every hardlink to a file reflects the same locked state.
