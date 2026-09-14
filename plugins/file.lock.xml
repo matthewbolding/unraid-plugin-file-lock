@@ -13,8 +13,7 @@
 
   <!-- Optional entries -->
 
-  <!-- TODO: fill in once a support thread exists in the Unraid Plugin Support forum -->
-  <Support>https://forums.unraid.net/topic/YOUR_SUPPORT_TOPIC</Support>
+  <Support>https://forums.unraid.net/topic/200587-plugin-file-lock/</Support>
 
   <Project>https://github.com/matthewbolding/unraid-plugin-file-lock</Project>
 
