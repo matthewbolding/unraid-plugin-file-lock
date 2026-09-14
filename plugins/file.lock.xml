@@ -3,12 +3,7 @@
   <Name>file.lock</Name>
 
   <Overview>
-    Lock and unlock individual files on your array or pools directly from the
-    webGUI (Tools -> File Lock), without dropping to a terminal. Browse your
-    shares, search by name, and toggle the immutable flag (chattr +i / -i) on
-    files to protect them from accidental deletion or modification. Selecting
-    a folder applies the flag recursively to every file inside it. Works on
-    XFS, BTRFS, and ZFS.
+    Lock and unlock individual files on your array or pools directly from the webGUI (Tools -> File Lock), without dropping to a terminal. Browse your shares, search by name, and toggle the immutable flag (chattr +i / -i) on files to protect them from accidental deletion or modification. Selecting a folder applies the flag recursively to every file inside it. Works on XFS, BTRFS, and ZFS.
   </Overview>
 
   <!-- Must match the pluginURL attribute in file.lock.plg exactly -->
