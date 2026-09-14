@@ -1,0 +1,13 @@
+<CommunityApplications>
+  <!-- Required profile -->
+  <Profile>
+    This repository holds **file.lock**, an Unraid plugin that adds a
+    Tools -> File Lock webGUI page for applying or removing the immutable
+    flag (`chattr +i` / `chattr -i`) on files without dropping to a terminal.
+
+    For support, please use the plugin's forum support thread linked from
+    its Community Apps listing, or open an issue on this repository.
+  </Profile>
+  <!-- Optional web page -->
+  <WebPage>https://github.com/matthewbolding/unraid-plugin-file-lock</WebPage>
+</CommunityApplications>

@@ -1,0 +1,941 @@
+<?xml version='1.0' standalone='yes'?>
+<!DOCTYPE PLUGIN [
+<!ENTITY name      "file.lock">
+<!ENTITY author    "Matthew Bolding">
+<!ENTITY version   "2026.09.13">
+<!ENTITY pluginURL "https://raw.githubusercontent.com/matthewbolding/unraid-plugin-file-lock/master/file.lock.plg">
+<!ENTITY launch    "Tools/FileLock">
+]>
+
+<PLUGIN name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;" launch="&launch;">
+
+<CHANGES>
+### 2026.09.13
+- Built from source.
+</CHANGES>
+
+<FILE Name="/usr/local/emhttp/plugins/file.lock/include/PathResolver.php">
+<INLINE>
+<![CDATA[<?php
+/**
+ * PathResolver.php
+ *
+ * Maps between Unraid's fused user-share paths (/mnt/user/...) and the
+ * physical disk paths that actually back each file (/mnt/disk1/..., /mnt/cache/...).
+ *
+ * chattr / lsattr only work on the real on-disk path, because the shfs FUSE
+ * layer that presents /mnt/user does not implement the ioctls they use.
+ * The UI only ever shows the fused path; everything below resolves it.
+ */
+
+class PathResolver {
+
+    /** Directory names directly under /mnt that are NOT array disks or pools. */
+    const RESERVED = ['user', 'user0', 'disks', 'remotes', 'addons', 'rootshare'];
+
+    /** Per-request cache for diskRoots(), which is otherwise re-globbed constantly. */
+    private static ?array $diskRootsCache = null;
+
+    /**
+     * Physical mount roots that can back a user share: array disks + pools.
+     * e.g. ['/mnt/disk1', '/mnt/disk2', '/mnt/cache'].
+     */
+    public static function diskRoots(): array {
+        if (self::$diskRootsCache !== null) return self::$diskRootsCache;
+
+        $roots = [];
+
+        // Array data disks: /mnt/disk1, /mnt/disk2, ...
+        foreach (glob('/mnt/disk[0-9]*', GLOB_ONLYDIR) as $d) {
+            $roots[] = $d;
+        }
+
+        // Pools (cache and any named pool): everything else under /mnt that
+        // isn't reserved and isn't an array disk we already added.
+        foreach (glob('/mnt/*', GLOB_ONLYDIR) as $m) {
+            $name = basename($m);
+            if (in_array($name, self::RESERVED, true)) continue;
+            if (preg_match('/^disk[0-9]+$/', $name)) continue;
+            $roots[] = $m;
+        }
+
+        return self::$diskRootsCache = $roots;
+    }
+
+    /** Per-request cache for resolveDir(): fused directory -> [filename => diskPath]. */
+    private static array $dirCache = [];
+
+    /**
+     * Resolve every entry directly inside a fused directory to its physical
+     * disk path in one pass: scan each disk's copy of the directory once
+     * (readdir), instead of probing every disk with file_exists() for each
+     * file individually. On Unraid this also avoids waking a spun-down disk
+     * once per file that isn't even on it.
+     *
+     * First disk found wins, matching the previous first-hit semantics of
+     * toDisk(). Result is cached per directory for the life of the request,
+     * since callers (e.g. Browse.php's per-entry lookup, or a recursive
+     * Toggle.php walk) commonly resolve many files from the same directory.
+     */
+    public static function resolveDir(string $fusedDir): array {
+        $fusedDir = self::clean($fusedDir);
+        if (isset(self::$dirCache[$fusedDir])) return self::$dirCache[$fusedDir];
+
+        $map = [];
+        if (preg_match('#^/mnt/user0?/(.*)$#', $fusedDir, $m)) {
+            $rel = $m[1];
+            foreach (self::diskRoots() as $root) {
+                $cand = $rel === '' ? $root : $root . '/' . $rel;
+                if (!is_dir($cand)) continue;
+                $dh = @opendir($cand);
+                if ($dh === false) continue;
+                while (($name = readdir($dh)) !== false) {
+                    if ($name === '.' || $name === '..') continue;
+                    if (!isset($map[$name])) $map[$name] = $cand . '/' . $name;
+                }
+                closedir($dh);
+            }
+        }
+        return self::$dirCache[$fusedDir] = $map;
+    }
+
+    /**
+     * Convert a fused path to the physical disk path that actually holds it,
+     * via the directory-level cache above. Returns false if not found.
+     *
+     * If the path isn't a /mnt/user(0) path it's assumed to already be physical
+     * and is returned unchanged.
+     */
+    public static function toDisk(string $fused) {
+        $fused = self::clean($fused);
+
+        if (!preg_match('#^/mnt/user0?/(.+)$#', $fused)) {
+            return $fused; // not a user-share path; treat as already physical
+        }
+
+        $map = self::resolveDir(dirname($fused));
+        return $map[basename($fused)] ?? false;
+    }
+
+    /**
+     * Normalise a path: force leading slash, collapse '.' and '..', strip
+     * duplicate slashes. Does NOT require the path to exist (unlike realpath),
+     * so it is safe to run on user input before touching the filesystem.
+     */
+    public static function clean(string $path): string {
+        $parts = [];
+        foreach (explode('/', $path) as $seg) {
+            if ($seg === '' || $seg === '.') continue;
+            if ($seg === '..') { array_pop($parts); continue; }
+            $parts[] = $seg;
+        }
+        return '/' . implode('/', $parts);
+    }
+
+    /**
+     * Guard against directory traversal: confirm $path resolves to somewhere
+     * at or below $base (both fused paths). Returns the cleaned path, or false
+     * if it escapes the sandbox.
+     */
+    public static function within(string $path, string $base) {
+        $path = self::clean($path);
+        $base = self::clean($base);
+        if ($path === $base) return $path;
+        if (strpos($path, rtrim($base, '/') . '/') === 0) return $path;
+        return false;
+    }
+
+    /** Max paths per lsattr/chattr subprocess call, well under a typical ARG_MAX. */
+    const BATCH_SIZE = 200;
+
+    /**
+     * Read the immutable flag of a physical path via lsattr.
+     * Returns true (locked), false (unlocked), or null (couldn't determine,
+     * e.g. filesystem doesn't support attributes).
+     */
+    public static function isImmutable(string $diskPath) {
+        return self::isImmutableBatch([$diskPath])[$diskPath] ?? null;
+    }
+
+    /**
+     * Read the immutable flag of many physical paths at once: a handful of
+     * `lsattr` subprocesses (chunked to stay under ARG_MAX) instead of one
+     * per path, which matters once a directory has hundreds of files.
+     *
+     * Returns [diskPath => true|false|null], null meaning the filesystem
+     * couldn't report attributes for that path (lsattr omits it from output
+     * rather than failing the whole batch).
+     */
+    public static function isImmutableBatch(array $diskPaths): array {
+        $status = [];
+        foreach (array_unique($diskPaths) as $p) $status[$p] = null;
+        if (!$status) return $status;
+
+        foreach (array_chunk(array_keys($status), self::BATCH_SIZE) as $chunk) {
+            $args = implode(' ', array_map('escapeshellarg', $chunk));
+            $out = []; $rc = 0;
+            exec("lsattr -d -- $args 2>/dev/null", $out, $rc);
+            foreach ($out as $line) {
+                // Output per path looks like: "----i---------e----- /mnt/disk1/share/file.jpg"
+                if (!preg_match('/^(\S+)\s+(.*)$/', $line, $m)) continue;
+                $status[$m[2]] = strpos($m[1], 'i') !== false;
+            }
+        }
+        return $status;
+    }
+}
+]]>
+</INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/file.lock/include/common.php">
+<INLINE>
+<![CDATA[<?php
+/**
+ * common.php — shared bootstrap for the AJAX endpoints.
+ * Loads the resolver and the plugin config. CSRF is handled by Unraid globally.
+ */
+
+require_once __DIR__ . '/PathResolver.php';
+
+const FILELOCK_CFG = '/boot/config/plugins/file.lock/file.lock.cfg';
+
+function filelock_config(): array {
+    $cfg = is_file(FILELOCK_CFG) ? @parse_ini_file(FILELOCK_CFG) : [];
+    return [
+        'base' => $cfg['BASEDIR'] ?? '/mnt/user/media/video',
+    ];
+}
+
+// CSRF is validated globally by Unraid's webGUI before any plugin endpoint
+// runs, and the validated token is then stripped from $_POST. Endpoints
+// therefore do NOT re-check it (doing so fails, since the token is already
+// gone). The browser must still SEND csrf_token so the request passes
+// Unraid's gate in the first place.
+
+
+function filelock_json($data): void {
+    header('Content-Type: application/json');
+    echo json_encode($data);
+    exit;
+}
+]]>
+</INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/file.lock/include/Browse.php">
+<INLINE>
+<![CDATA[<?php
+/**
+ * Browse.php — list a directory (fused path) and report each file's lock state.
+ *
+ * POST: path (fused dir, defaults to base), csrf_token
+ * Returns JSON: { base, path, parent, entries:[{name,path,dir,locked}] }
+ *   locked: true = immutable, false = mutable, null = dir / unknown
+ */
+
+require_once __DIR__ . '/common.php';
+
+$conf = filelock_config();
+$base = $conf['base'];
+
+$path = $_POST['path'] ?? $base;
+$path = PathResolver::within($path, $base);
+if ($path === false)  filelock_json(['error' => 'Path is outside the base directory']);
+if (is_link($path))   filelock_json(['error' => 'Symlinks are not followed']);
+if (!is_dir($path))   filelock_json(['error' => 'Not a directory: ' . $path]);
+
+$dh = @opendir($path);
+if ($dh === false)    filelock_json(['error' => 'Cannot open directory']);
+
+$entries = [];
+$disks   = []; // fused file path => disk path, resolved after the listing loop
+while (($name = readdir($dh)) !== false) {
+    if ($name === '.' || $name === '..') continue;
+    $full  = rtrim($path, '/') . '/' . $name;
+    // Symlinks aren't listed at all: a symlink under the base directory could
+    // point outside it, and both navigating into it and locking through it
+    // (chattr follows a symlink to its target) would escape the sandbox.
+    if (is_link($full)) continue;
+    $isDir = is_dir($full);
+    $entries[] = ['name' => $name, 'path' => $full, 'dir' => $isDir, 'locked' => null];
+
+    if (!$isDir) {
+        $disk = PathResolver::toDisk($full);
+        if ($disk !== false) $disks[$full] = $disk;
+    }
+}
+closedir($dh);
+
+// One batched lsattr call for every file's status instead of one per file.
+$status = PathResolver::isImmutableBatch(array_values($disks));
+foreach ($entries as &$e) {
+    if (isset($disks[$e['path']])) $e['locked'] = $status[$disks[$e['path']]] ?? null;
+}
+unset($e);
+
+// Folders first, then files, each alphabetical (case-insensitive).
+usort($entries, function ($a, $b) {
+    if ($a['dir'] !== $b['dir']) return $a['dir'] ? -1 : 1;
+    return strcasecmp($a['name'], $b['name']);
+});
+
+filelock_json([
+    'base'    => $base,
+    'path'    => $path,
+    'parent'  => ($path === PathResolver::clean($base)) ? null : dirname($path),
+    'entries' => $entries,
+]);
+]]>
+</INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/file.lock/include/Toggle.php">
+<INLINE>
+<![CDATA[<?php
+/**
+ * Toggle.php — apply or remove the immutable flag on the selected items.
+ *
+ * POST: action ('lock'|'unlock'), paths (JSON array of fused paths), csrf_token
+ * Returns JSON: { action, results:[{path,ok,msg}] }
+ *
+ * Directories cannot themselves be immutable, so a selected directory is
+ * treated as "apply to every regular file beneath it" (recursive).
+ */
+
+require_once __DIR__ . '/common.php';
+
+$conf = filelock_config();
+$base = $conf['base'];
+
+$action = $_POST['action'] ?? '';
+$paths  = json_decode($_POST['paths'] ?? '[]', true);
+
+if (!in_array($action, ['lock', 'unlock'], true) || !is_array($paths)) {
+    filelock_json(['error' => 'Bad request']);
+}
+$flag = $action === 'lock' ? '+i' : '-i';
+
+$results = [];
+$jobs    = []; // fused file path => disk path, resolved files waiting for chattr
+
+/** Resolve a single fused file path to its disk path, or record why it can't be done. */
+$prepareFile = function (string $fused) use (&$results, &$jobs, $base) {
+    $safe = PathResolver::within($fused, $base);
+    if ($safe === false) {
+        $results[] = ['path' => $fused, 'ok' => false, 'msg' => 'outside base directory'];
+        return;
+    }
+    $disk = PathResolver::toDisk($safe);
+    if ($disk === false || !is_file($disk)) {
+        $results[] = ['path' => $fused, 'ok' => false, 'msg' => 'file not found on any disk'];
+        return;
+    }
+    $jobs[$fused] = $disk;
+};
+
+foreach ($paths as $p) {
+    $safe = PathResolver::within($p, $base);
+    if ($safe === false) {
+        $results[] = ['path' => $p, 'ok' => false, 'msg' => 'outside base directory'];
+        continue;
+    }
+    // chattr opens its target through a symlink, so locking a symlink would
+    // actually flag whatever it points at — possibly outside the sandbox.
+    if (is_link($safe)) {
+        $results[] = ['path' => $p, 'ok' => false, 'msg' => 'symlinks are not followed'];
+        continue;
+    }
+    if (is_dir($safe)) {
+        // Recurse into the directory and flag every regular file. The filter
+        // excludes symlinks from both the walk and recursion, so a symlinked
+        // subdirectory can't be used to walk outside the sandbox and a
+        // symlinked file can't be used to chattr its target.
+        $dirIter = new RecursiveDirectoryIterator($safe, FilesystemIterator::SKIP_DOTS);
+        $filter  = new RecursiveCallbackFilterIterator($dirIter, fn($cur) => !$cur->isLink());
+        $it = new RecursiveIteratorIterator($filter);
+        foreach ($it as $f) {
+            if ($f->isFile()) $prepareFile($f->getPathname());
+        }
+    } else {
+        $prepareFile($safe);
+    }
+}
+
+// Apply the flag in batches -- a handful of chattr subprocesses instead of
+// one per file. If a batch as a whole fails (e.g. one bad path in it), fall
+// back to running that batch's members individually so one bad file doesn't
+// mark the rest as failed too.
+foreach (array_chunk($jobs, PathResolver::BATCH_SIZE, true) as $chunk) {
+    $args = implode(' ', array_map('escapeshellarg', $chunk));
+    $out = []; $rc = 0;
+    exec("chattr $flag -- $args 2>&1", $out, $rc);
+    if ($rc === 0) {
+        foreach ($chunk as $fused => $disk) {
+            $results[] = ['path' => $fused, 'ok' => true, 'msg' => ''];
+        }
+        continue;
+    }
+    foreach ($chunk as $fused => $disk) {
+        $out2 = []; $rc2 = 0;
+        exec('chattr ' . $flag . ' -- ' . escapeshellarg($disk) . ' 2>&1', $out2, $rc2);
+        $results[] = ['path' => $fused, 'ok' => ($rc2 === 0), 'msg' => $rc2 === 0 ? '' : implode(' ', $out2)];
+    }
+}
+
+filelock_json(['action' => $action, 'results' => $results]);
+]]>
+</INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/file.lock/include/Search.php">
+<INLINE>
+<![CDATA[<?php
+/**
+ * Search.php — recursively find files/folders under a fused directory whose
+ * name contains a query string, reporting each match's lock state.
+ *
+ * POST: q (query string), path (fused dir to search from, defaults to base),
+ *       csrf_token
+ * Returns JSON: { base, path, query, results:[{name,path,dir,locked}], truncated }
+ *   truncated: true if the scan or result count hit its cap before finishing
+ */
+
+require_once __DIR__ . '/common.php';
+
+const FILELOCK_SEARCH_MAX_RESULTS = 500;
+const FILELOCK_SEARCH_MAX_SCAN    = 20000;
+
+$conf = filelock_config();
+$base = $conf['base'];
+
+$q = trim($_POST['q'] ?? '');
+if ($q === '') filelock_json(['error' => 'Empty search query']);
+
+$path = $_POST['path'] ?? $base;
+$path = PathResolver::within($path, $base);
+if ($path === false) filelock_json(['error' => 'Path is outside the base directory']);
+if (is_link($path))  filelock_json(['error' => 'Symlinks are not followed']);
+if (!is_dir($path))  filelock_json(['error' => 'Not a directory: ' . $path]);
+
+$results   = [];
+$scanned   = 0;
+$truncated = false;
+
+// Same symlink guard as Browse/Toggle: a symlinked subdirectory could walk
+// outside the sandbox, so it's excluded from both the walk and recursion.
+$dirIter = new RecursiveDirectoryIterator($path, FilesystemIterator::SKIP_DOTS);
+$filter  = new RecursiveCallbackFilterIterator($dirIter, fn($cur) => !$cur->isLink());
+$it = new RecursiveIteratorIterator($filter, RecursiveIteratorIterator::SELF_FIRST);
+
+foreach ($it as $f) {
+    if (++$scanned > FILELOCK_SEARCH_MAX_SCAN) { $truncated = true; break; }
+    if (stripos($f->getFilename(), $q) === false) continue;
+
+    $results[] = ['name' => $f->getFilename(), 'path' => $f->getPathname(), 'dir' => $f->isDir(), 'locked' => null];
+    if (count($results) >= FILELOCK_SEARCH_MAX_RESULTS) { $truncated = true; break; }
+}
+
+// Batch-resolve lock status for every matched file in one/few lsattr calls,
+// same as Browse.php, rather than one subprocess per match.
+$disks = [];
+foreach ($results as $r) {
+    if ($r['dir']) continue;
+    $disk = PathResolver::toDisk($r['path']);
+    if ($disk !== false) $disks[$r['path']] = $disk;
+}
+$status = PathResolver::isImmutableBatch(array_values($disks));
+foreach ($results as &$r) {
+    if (isset($disks[$r['path']])) $r['locked'] = $status[$disks[$r['path']]] ?? null;
+}
+unset($r);
+
+usort($results, function ($a, $b) {
+    if ($a['dir'] !== $b['dir']) return $a['dir'] ? -1 : 1;
+    return strcasecmp($a['name'], $b['name']);
+});
+
+filelock_json([
+    'base'      => $base,
+    'path'      => $path,
+    'query'     => $q,
+    'results'   => $results,
+    'truncated' => $truncated,
+]);
+]]>
+</INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/file.lock/include/Settings.php">
+<INLINE>
+<![CDATA[<?php
+/**
+ * Settings.php — persist the configurable base directory.
+ *
+ * POST: base (fused path), csrf_token
+ * Returns JSON: { ok, base } or { ok:false, msg }
+ */
+
+require_once __DIR__ . '/common.php';
+
+$base = PathResolver::clean($_POST['base'] ?? '/mnt/user');
+
+// The whole app's safety model is "sandboxed to base and below", so the base
+// itself must live under /mnt (array disks, pools, user shares) -- anything
+// else would defeat the sandbox rather than define it.
+if (strpos($base, '/mnt/') !== 0) {
+    filelock_json(['ok' => false, 'msg' => 'Base directory must be under /mnt']);
+}
+
+if (!is_dir($base)) {
+    filelock_json(['ok' => false, 'msg' => 'Directory does not exist: ' . $base]);
+}
+
+$dir = dirname(FILELOCK_CFG);
+if (!is_dir($dir)) @mkdir($dir, 0755, true);
+
+$ok = @file_put_contents(FILELOCK_CFG, "BASEDIR=\"$base\"\n");
+filelock_json($ok !== false
+    ? ['ok' => true, 'base' => $base]
+    : ['ok' => false, 'msg' => 'Could not write config to flash']);
+]]>
+</INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/file.lock/file.lock.page">
+<INLINE>
+<![CDATA[Menu="Utilities"
+Title="File Lock"
+Icon="lock"
+Tag="lock"
+---
+<?php
+/* file.lock.page — renders under Tools / Utilities in the Unraid webGUI. */
+require_once '/usr/local/emhttp/plugins/file.lock/include/common.php';
+$conf = filelock_config();
+$base = $conf['base'];
+// Unraid's webGUI wrapper has already parsed var.ini into the global $var;
+// prefer that token, falling back to a direct read if it isn't set.
+global $var;
+$csrf = $var['csrf_token'] ?? '';
+if ($csrf === '') {
+    $flvar = @parse_ini_file('/var/local/emhttp/var.ini');
+    $csrf  = $flvar['csrf_token'] ?? '';
+}
+?>
+
+<link rel="stylesheet" href="/plugins/file.lock/styles/file.lock.css">
+
+<div id="filelock-app"
+     data-base="<?=htmlspecialchars($base)?>"
+     data-csrf="<?=htmlspecialchars($csrf)?>">
+
+  <div class="fl-bar">
+    <button id="fl-up" class="fl-btn" title="Up one level">..</button>
+    <div id="fl-crumbs" class="fl-crumbs"></div>
+    <div class="fl-spacer"></div>
+    <input type="text" id="fl-search" class="fl-search-input"
+           placeholder="Search this folder and below&hellip;">
+    <button id="fl-search-clear" class="fl-btn" hidden>Clear</button>
+    <button id="fl-lock"   class="fl-btn fl-lock"   disabled>Lock</button>
+    <button id="fl-unlock" class="fl-btn fl-unlock" disabled>Unlock</button>
+  </div>
+
+  <table class="fl-table">
+    <thead>
+      <tr>
+        <th class="fl-c-check"><input type="checkbox" id="fl-all"></th>
+        <th class="fl-c-name">Name</th>
+        <th class="fl-c-status">Status</th>
+      </tr>
+    </thead>
+    <tbody id="fl-list"></tbody>
+  </table>
+
+  <div id="fl-status" class="fl-msg"></div>
+
+  <details class="fl-settings">
+    <summary>Settings</summary>
+    <div class="fl-settings-body">
+      <label>Base Directory&nbsp;
+        <input type="text" id="fl-base" value="<?=htmlspecialchars($base)?>" size="40">
+      </label>
+      <button id="fl-save" class="fl-btn">Save</button>
+      <span class="fl-hint">The browser is sandboxed to this directory and below.</span>
+    </div>
+  </details>
+</div>
+
+<script src="/plugins/file.lock/js/file.lock.js"></script>
+]]>
+</INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/file.lock/js/file.lock.js">
+<INLINE>
+<![CDATA[/* file.lock.js — file-browser front end for the File Lock plugin. */
+(function () {
+  'use strict';
+
+  const app   = document.getElementById('filelock-app');
+  const BASE  = app.dataset.base;
+  // Unraid defines a global `csrf_token` on every webGUI page; it is the
+  // authoritative token for POSTs. Fall back to the page-embedded value.
+  const CSRF  = (typeof csrf_token !== 'undefined' && csrf_token)
+                  ? csrf_token
+                  : (app.dataset.csrf || '');
+  const EP     = '/plugins/file.lock/include/';
+
+  const list   = document.getElementById('fl-list');
+  const crumbs = document.getElementById('fl-crumbs');
+  const upBtn  = document.getElementById('fl-up');
+  const lockBtn   = document.getElementById('fl-lock');
+  const unlockBtn = document.getElementById('fl-unlock');
+  const allBox = document.getElementById('fl-all');
+  const status = document.getElementById('fl-status');
+  const searchInput    = document.getElementById('fl-search');
+  const searchClearBtn = document.getElementById('fl-search-clear');
+
+  let current = BASE;     // current fused directory
+  let parent  = null;     // parent dir or null at base
+  let searchActive = false;
+  let lastQuery    = '';
+  let searchTimer  = null;
+  const selected = new Set();
+
+  /* --- helpers --------------------------------------------------------- */
+
+  function post(file, data) {
+    const body = new URLSearchParams({ csrf_token: CSRF, ...data });
+    return fetch(EP + file, { method: 'POST', body })
+      .then(r => r.json());
+  }
+
+  function setMsg(text, kind) {
+    status.textContent = text || '';
+    status.className = 'fl-msg' + (kind ? ' fl-msg-' + kind : '');
+  }
+
+  function refreshButtons() {
+    const n = selected.size;
+    lockBtn.disabled = unlockBtn.disabled = (n === 0);
+    lockBtn.textContent   = n ? `Lock (${n})`   : 'Lock';
+    unlockBtn.textContent = n ? `Unlock (${n})` : 'Unlock';
+  }
+
+  /* --- rendering ------------------------------------------------------- */
+
+  function renderCrumbs() {
+    crumbs.innerHTML = '';
+    const rel = current.startsWith(BASE) ? current.slice(BASE.length) : current;
+    const segs = rel.split('/').filter(Boolean);
+    let acc = BASE.replace(/\/$/, '');
+
+    addCrumb(BASE.replace(/\/+$/, '') || '/', BASE);
+    segs.forEach(seg => {
+      acc += '/' + seg;
+      crumbs.appendChild(document.createTextNode(' / '));
+      addCrumb(seg, acc);
+    });
+  }
+
+  function addCrumb(label, path) {
+    const a = document.createElement('a');
+    a.textContent = label;
+    a.href = '#';
+    a.onclick = e => { e.preventDefault(); load(path); };
+    crumbs.appendChild(a);
+  }
+
+  /** Build one table row for either a normal directory listing or a search
+   *  result. `opts.showPath` adds a small parent-folder line under the name,
+   *  since search results (unlike a folder listing) span multiple folders. */
+  function buildRow(en, opts) {
+    opts = opts || {};
+    const tr = document.createElement('tr');
+    tr.className = en.dir ? 'fl-row fl-dir' : 'fl-row fl-file';
+
+    // checkbox
+    const tdC = tr.insertCell();
+    tdC.className = 'fl-c-check';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.onchange = () => {
+      cb.checked ? selected.add(en.path) : selected.delete(en.path);
+      tr.classList.toggle('fl-selected', cb.checked);
+      refreshButtons();
+    };
+    tdC.appendChild(cb);
+
+    // name (folders navigate on click)
+    const tdN = tr.insertCell();
+    tdN.className = 'fl-c-name';
+    const icon = document.createElement('span');
+    icon.className = 'fl-icon';
+    icon.textContent = en.dir ? '\u{1F4C1}' : '\u{1F4C4}';
+    tdN.appendChild(icon);
+    if (en.dir) {
+      const a = document.createElement('a');
+      a.textContent = en.name;
+      a.href = '#';
+      a.onclick = e => { e.preventDefault(); load(en.path); };
+      tdN.appendChild(a);
+    } else {
+      const span = document.createElement('span');
+      span.textContent = en.name;
+      span.className = 'fl-fname';
+      span.style.cursor = 'pointer';
+      span.onclick = () => { cb.checked = !cb.checked; cb.onchange(); };
+      tdN.appendChild(span);
+    }
+
+    if (opts.showPath) {
+      const parentPath = en.path.slice(0, en.path.length - en.name.length - 1);
+      const rel = parentPath.startsWith(BASE) ? (parentPath.slice(BASE.length) || '/') : parentPath;
+      const hint = document.createElement('div');
+      hint.className = 'fl-path-hint';
+      hint.textContent = rel;
+      hint.title = parentPath;
+      hint.onclick = () => load(parentPath);
+      tdN.appendChild(hint);
+    }
+
+    // status
+    const tdS = tr.insertCell();
+    tdS.className = 'fl-c-status';
+    if (en.dir) {
+      tdS.innerHTML = '<span class="fl-badge fl-neutral">folder</span>';
+    } else if (en.locked === true) {
+      tdS.innerHTML = '<span class="fl-badge fl-locked">locked</span>';
+      tr.classList.add('fl-is-locked');
+    } else if (en.locked === false) {
+      tdS.innerHTML = '<span class="fl-badge fl-unlocked">unlocked</span>';
+      tr.classList.add('fl-is-unlocked');
+    } else {
+      tdS.innerHTML = '<span class="fl-badge fl-neutral">n/a</span>';
+    }
+
+    return tr;
+  }
+
+  function render(data) {
+    if (data.error) { setMsg(data.error, 'err'); return; }
+    current = data.path;
+    parent  = data.parent;
+    selected.clear();
+    allBox.checked = false;
+    upBtn.disabled = (parent === null);
+    renderCrumbs();
+    refreshButtons();
+
+    list.innerHTML = '';
+    if (!data.entries.length) {
+      const tr = list.insertRow();
+      tr.innerHTML = '<td colspan="3" class="fl-empty">Empty directory</td>';
+      return;
+    }
+    data.entries.forEach(en => list.appendChild(buildRow(en)));
+  }
+
+  function renderSearch(data) {
+    if (data.error) { setMsg(data.error, 'err'); return; }
+    selected.clear();
+    allBox.checked = false;
+    refreshButtons();
+
+    list.innerHTML = '';
+    if (!data.results.length) {
+      const tr = list.insertRow();
+      tr.innerHTML = '<td colspan="3" class="fl-empty">No matches</td>';
+    } else {
+      data.results.forEach(en => list.appendChild(buildRow(en, { showPath: true })));
+    }
+    setMsg(
+      data.truncated
+        ? `Showing first ${data.results.length} match(es) — search stopped early on a very large tree.`
+        : `${data.results.length} match(es) for “${data.query}”.`
+    );
+  }
+
+  /* --- actions --------------------------------------------------------- */
+
+  function load(path) {
+    if (searchTimer) { clearTimeout(searchTimer); searchTimer = null; }
+    searchActive = false;
+    searchClearBtn.hidden = true;
+    searchInput.value = '';
+    setMsg('');
+    post('Browse.php', { path }).then(render)
+      .catch(() => setMsg('Failed to load directory', 'err'));
+  }
+
+  function runSearch() {
+    const q = searchInput.value.trim();
+    if (!q) { load(current); return; }
+    lastQuery = q;
+    searchActive = true;
+    searchClearBtn.hidden = false;
+    setMsg('Searching…');
+    post('Search.php', { q, path: current }).then(renderSearch)
+      .catch(() => setMsg('Search failed', 'err'));
+  }
+
+  /** Re-run whatever's currently on screen (a search or a folder listing)
+   *  after a lock/unlock, so selections and status badges reflect reality. */
+  function refresh() {
+    if (searchActive && lastQuery) {
+      post('Search.php', { q: lastQuery, path: current }).then(renderSearch);
+    } else {
+      load(current);
+    }
+  }
+
+  function apply(action) {
+    if (!selected.size) return;
+    const paths = JSON.stringify([...selected]);
+    lockBtn.disabled = unlockBtn.disabled = true;
+    setMsg('Working…');
+    post('Toggle.php', { action, paths }).then(res => {
+      if (res.error) { setMsg(res.error, 'err'); return; }
+      const fail = res.results.filter(r => !r.ok);
+      const ok   = res.results.length - fail.length;
+      if (fail.length) {
+        setMsg(`${ok} succeeded, ${fail.length} failed (e.g. ${fail[0].msg})`, 'err');
+      } else {
+        setMsg(`${action === 'lock' ? 'Locked' : 'Unlocked'} ${ok} file(s).`, 'ok');
+      }
+      refresh();
+    }).catch(() => setMsg('Operation failed', 'err'));
+  }
+
+  /* --- wire up --------------------------------------------------------- */
+
+  upBtn.onclick     = () => { if (parent !== null) load(parent); };
+  lockBtn.onclick   = () => apply('lock');
+  unlockBtn.onclick = () => apply('unlock');
+
+  allBox.onchange = () => {
+    list.querySelectorAll('input[type=checkbox]').forEach(cb => {
+      if (cb.checked !== allBox.checked) { cb.checked = allBox.checked; cb.onchange(); }
+    });
+  };
+
+  searchInput.addEventListener('input', () => {
+    if (searchTimer) clearTimeout(searchTimer);
+    if (!searchInput.value.trim()) { load(current); return; }
+    searchTimer = setTimeout(runSearch, 300);
+  });
+  searchInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (searchTimer) clearTimeout(searchTimer);
+      runSearch();
+    }
+  });
+  searchClearBtn.onclick = () => load(current);
+
+  document.getElementById('fl-save').onclick = () => {
+    const base = document.getElementById('fl-base').value.trim();
+    post('Settings.php', { base }).then(res => {
+      if (res.ok) {
+        setMsg('Base directory saved. Reloading…', 'ok');
+        setTimeout(() => location.reload(), 600);
+      } else {
+        setMsg(res.msg || 'Could not save', 'err');
+      }
+    });
+  };
+
+  load(current);
+})();
+]]>
+</INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/file.lock/styles/file.lock.css">
+<INLINE>
+<![CDATA[/* file.lock.css — kept theme-neutral so it sits well in both Unraid themes. */
+
+#filelock-app { max-width: 1200px; }
+
+.fl-bar {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 10px; flex-wrap: wrap;
+}
+.fl-spacer { flex: 1 1 auto; }
+
+.fl-btn {
+  cursor: pointer; padding: 5px 12px; border-radius: 4px;
+  white-space: nowrap; line-height: 1.4;
+  border: 1px solid rgba(128,128,128,.4); background: rgba(128,128,128,.08);
+}
+.fl-btn:disabled { opacity: .45; cursor: default; }
+/* Fixed width so the "(n)" count never resizes the button or wraps the bar. */
+.fl-lock, .fl-unlock { min-width: 96px; text-align: center; }
+.fl-lock:not(:disabled)   { border-color: #2e7d32; color: #2e7d32; }
+.fl-unlock:not(:disabled) { border-color: #c62828; color: #c62828; }
+
+.fl-crumbs { font-size: 14px; }
+.fl-crumbs a { text-decoration: none; }
+.fl-crumbs a:hover { text-decoration: underline; }
+
+.fl-search-input {
+  padding: 5px 10px; border-radius: 4px; min-width: 220px;
+  border: 1px solid rgba(128,128,128,.4); background: rgba(128,128,128,.06);
+}
+
+.fl-path-hint {
+  font-size: 12px; opacity: .6; cursor: pointer; margin-top: 1px;
+}
+.fl-path-hint:hover { text-decoration: underline; }
+
+.fl-table { width: 100%; border-collapse: collapse; }
+.fl-table th, .fl-table td {
+  text-align: left; padding: 6px 10px;
+  border-bottom: 1px solid rgba(128,128,128,.18);
+}
+.fl-c-check  { width: 34px; }
+.fl-c-status { width: 120px; }
+
+.fl-row:hover { background: rgba(128,128,128,.08); }
+.fl-row.fl-selected { background: rgba(33,150,243,.14); }
+
+.fl-icon { margin-right: 6px; }
+.fl-dir a { font-weight: 600; text-decoration: none; }
+.fl-dir a:hover { text-decoration: underline; }
+
+/* Locked = green, unlocked = red, applied to the whole row's name colour. */
+.fl-is-locked   .fl-c-name { color: #2e7d32; }
+.fl-is-unlocked .fl-c-name { color: #c62828; }
+
+.fl-badge {
+  display: inline-block; padding: 2px 8px; border-radius: 10px;
+  font-size: 12px; font-weight: 600;
+}
+.fl-locked   { background: #2e7d32; color: #fff; }
+.fl-unlocked { background: #c62828; color: #fff; }
+.fl-neutral  { background: rgba(128,128,128,.25); }
+
+.fl-empty { text-align: center; opacity: .6; padding: 16px; }
+
+.fl-msg { margin-top: 10px; min-height: 18px; font-size: 13px; }
+.fl-msg-ok  { color: #2e7d32; }
+.fl-msg-err { color: #c62828; }
+
+.fl-settings { margin-top: 18px; font-size: 13px; }
+.fl-settings summary { cursor: pointer; opacity: .8; }
+.fl-settings-body { padding: 10px 4px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.fl-hint { opacity: .6; }
+]]>
+</INLINE>
+</FILE>
+<FILE Run="/bin/bash">
+<INLINE>
+mkdir -p /boot/config/plugins/file.lock
+[ -f /boot/config/plugins/file.lock/file.lock.cfg ] || echo 'BASEDIR="/mnt/user/media/video"' > /boot/config/plugins/file.lock/file.lock.cfg
+chmod -R 755 /usr/local/emhttp/plugins/file.lock
+echo ""
+echo "File Lock 2026.09.13 installed. Open it under Tools in the webGUI."
+echo ""
+</INLINE>
+</FILE>
+<FILE Name="/tmp/file.lock-remove" Run="/bin/bash" Method="remove">
+<INLINE>
+rm -rf /usr/local/emhttp/plugins/file.lock
+rm -f /boot/config/plugins/file.lock.plg
+</INLINE>
+</FILE>
+
+</PLUGIN>
