@@ -74,6 +74,16 @@ chmod -R 755 /usr/local/emhttp/plugins/file.lock
 
 Then open **Tools → File Lock** in the webGUI and hard-refresh after each edit. If you're editing over a code-server / VS Code container, map `/usr/local/emhttp/plugins` into it, or edit on a share and re-run the extract command above.
 
+## Testing
+
+`tests/` covers the sandboxing and path-resolution logic in `include/PathResolver.php` (fused-path cleaning, the `within()` traversal guard, fused-to-disk resolution, and `lsattr` output parsing) with a small dependency-free harness — no PHPUnit/Composer, matching the zero-dependency approach `build.py` already takes. The disk-resolution tests point at a throwaway temp directory rather than the real `/mnt`, so they never touch actual array data. Run them with:
+
+```bash
+php tests/run.php
+```
+
+`Browse.php`/`Toggle.php`/`Search.php`/`Settings.php` aren't covered here — they're thin AJAX endpoints over `$_POST`, real disk I/O, and the live config file, so they're better exercised by hand through the webGUI than mocked in a unit test.
+
 ## Caveats
 
 - **Mover interaction:** an immutable file on cache or a pool storage can't be moved or deleted until `+i` is removed. The mover will therefore skip locked files.
