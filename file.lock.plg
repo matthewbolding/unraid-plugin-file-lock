@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "file.lock">
 <!ENTITY author    "Matthew Bolding">
-<!ENTITY version   "2026.09.13">
+<!ENTITY version   "2026.09.14">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/matthewbolding/unraid-plugin-file-lock/master/file.lock.plg">
 <!ENTITY launch    "Tools/FileLock">
 ]>
@@ -10,7 +10,7 @@
 <PLUGIN name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;" launch="&launch;">
 
 <CHANGES>
-### 2026.09.13
+### 2026.09.14
 - Built from source.
 </CHANGES>
 
@@ -33,36 +33,39 @@ class PathResolver {
     /** Directory names directly under /mnt that are NOT array disks or pools. */
     const RESERVED = ['user', 'user0', 'disks', 'remotes', 'addons', 'rootshare'];
 
-    /** Per-request cache for diskRoots(), which is otherwise re-globbed constantly. */
-    private static ?array $diskRootsCache = null;
+    /** Per-request cache for diskRoots(), which is otherwise re-globbed constantly. Keyed by $mnt. */
+    private static array $diskRootsCache = [];
 
     /**
      * Physical mount roots that can back a user share: array disks + pools.
      * e.g. ['/mnt/disk1', '/mnt/disk2', '/mnt/cache'].
+     *
+     * $mnt is injectable (defaults to the real '/mnt') purely so tests can
+     * point this at a throwaway fixture tree instead of the live array.
      */
-    public static function diskRoots(): array {
-        if (self::$diskRootsCache !== null) return self::$diskRootsCache;
+    public static function diskRoots(string $mnt = '/mnt'): array {
+        if (isset(self::$diskRootsCache[$mnt])) return self::$diskRootsCache[$mnt];
 
         $roots = [];
 
-        // Array data disks: /mnt/disk1, /mnt/disk2, ...
-        foreach (glob('/mnt/disk[0-9]*', GLOB_ONLYDIR) as $d) {
+        // Array data disks: $mnt/disk1, $mnt/disk2, ...
+        foreach (glob("$mnt/disk[0-9]*", GLOB_ONLYDIR) as $d) {
             $roots[] = $d;
         }
 
-        // Pools (cache and any named pool): everything else under /mnt that
+        // Pools (cache and any named pool): everything else under $mnt that
         // isn't reserved and isn't an array disk we already added.
-        foreach (glob('/mnt/*', GLOB_ONLYDIR) as $m) {
+        foreach (glob("$mnt/*", GLOB_ONLYDIR) as $m) {
             $name = basename($m);
             if (in_array($name, self::RESERVED, true)) continue;
             if (preg_match('/^disk[0-9]+$/', $name)) continue;
             $roots[] = $m;
         }
 
-        return self::$diskRootsCache = $roots;
+        return self::$diskRootsCache[$mnt] = $roots;
     }
 
-    /** Per-request cache for resolveDir(): fused directory -> [filename => diskPath]. */
+    /** Per-request cache for resolveDir(): [$mnt][fused directory] -> [filename => diskPath]. */
     private static array $dirCache = [];
 
     /**
@@ -77,14 +80,14 @@ class PathResolver {
      * since callers (e.g. Browse.php's per-entry lookup, or a recursive
      * Toggle.php walk) commonly resolve many files from the same directory.
      */
-    public static function resolveDir(string $fusedDir): array {
+    public static function resolveDir(string $fusedDir, string $mnt = '/mnt'): array {
         $fusedDir = self::clean($fusedDir);
-        if (isset(self::$dirCache[$fusedDir])) return self::$dirCache[$fusedDir];
+        if (isset(self::$dirCache[$mnt][$fusedDir])) return self::$dirCache[$mnt][$fusedDir];
 
         $map = [];
         if (preg_match('#^/mnt/user0?/(.*)$#', $fusedDir, $m)) {
             $rel = $m[1];
-            foreach (self::diskRoots() as $root) {
+            foreach (self::diskRoots($mnt) as $root) {
                 $cand = $rel === '' ? $root : $root . '/' . $rel;
                 if (!is_dir($cand)) continue;
                 $dh = @opendir($cand);
@@ -96,7 +99,7 @@ class PathResolver {
                 closedir($dh);
             }
         }
-        return self::$dirCache[$fusedDir] = $map;
+        return self::$dirCache[$mnt][$fusedDir] = $map;
     }
 
     /**
@@ -106,14 +109,14 @@ class PathResolver {
      * If the path isn't a /mnt/user(0) path it's assumed to already be physical
      * and is returned unchanged.
      */
-    public static function toDisk(string $fused) {
+    public static function toDisk(string $fused, string $mnt = '/mnt') {
         $fused = self::clean($fused);
 
         if (!preg_match('#^/mnt/user0?/(.+)$#', $fused)) {
             return $fused; // not a user-share path; treat as already physical
         }
 
-        $map = self::resolveDir(dirname($fused));
+        $map = self::resolveDir(dirname($fused), $mnt);
         return $map[basename($fused)] ?? false;
     }
 
@@ -176,12 +179,25 @@ class PathResolver {
             $out = []; $rc = 0;
             exec("lsattr -d -- $args 2>/dev/null", $out, $rc);
             foreach ($out as $line) {
-                // Output per path looks like: "----i---------e----- /mnt/disk1/share/file.jpg"
-                if (!preg_match('/^(\S+)\s+(.*)$/', $line, $m)) continue;
-                $status[$m[2]] = strpos($m[1], 'i') !== false;
+                $parsed = self::parseLsattrLine($line);
+                if ($parsed === null) continue;
+                [$path, $immutable] = $parsed;
+                $status[$path] = $immutable;
             }
         }
         return $status;
+    }
+
+    /**
+     * Parse one line of `lsattr -d` output, e.g.
+     * "----i---------e----- /mnt/disk1/share/file.jpg".
+     * Returns [diskPath, immutable] or null if the line doesn't match the
+     * expected shape (kept separate from isImmutableBatch so it's testable
+     * without actually shelling out to lsattr).
+     */
+    public static function parseLsattrLine(string $line): ?array {
+        if (!preg_match('/^(\S+)\s+(.*)$/', $line, $m)) return null;
+        return [$m[2], strpos($m[1], 'i') !== false];
     }
 }
 ]]>
@@ -384,6 +400,114 @@ filelock_json(['action' => $action, 'results' => $results]);
 ]]>
 </INLINE>
 </FILE>
+<FILE Name="/usr/local/emhttp/plugins/file.lock/include/Delete.php">
+<INLINE>
+<![CDATA[<?php
+/**
+ * Delete.php — unlock (remove the immutable flag, if set) and permanently
+ * delete the selected files.
+ *
+ * POST: paths (JSON array of fused paths), csrf_token
+ * Returns JSON: { results:[{path,ok,msg}] }
+ *
+ * This is destructive and irreversible, unlike Toggle.php's lock/unlock.
+ * The front end gates the call behind an explicit confirm() prompt; this
+ * endpoint does not re-confirm anything itself (there is nothing meaningful
+ * to check server-side that isn't already covered by the normal CSRF/base-
+ * directory checks below), so it must never be wired up to fire without
+ * that prompt having already been shown and accepted.
+ *
+ * Directories cannot themselves be immutable and are never deleted here —
+ * only regular files, matching Toggle.php's recursive-into-a-folder
+ * semantics. A selected folder's contents are unlocked and deleted
+ * recursively; the (now possibly empty) folder itself is left in place.
+ */
+
+require_once __DIR__ . '/common.php';
+
+$conf = filelock_config();
+$base = $conf['base'];
+
+$paths = json_decode($_POST['paths'] ?? '[]', true);
+if (!is_array($paths)) {
+    filelock_json(['error' => 'Bad request']);
+}
+
+$results = [];
+$jobs    = []; // fused file path => disk path, resolved files waiting for unlock+delete
+
+/** Resolve a single fused file path to its disk path, or record why it can't be done. */
+$prepareFile = function (string $fused) use (&$results, &$jobs, $base) {
+    $safe = PathResolver::within($fused, $base);
+    if ($safe === false) {
+        $results[] = ['path' => $fused, 'ok' => false, 'msg' => 'outside base directory'];
+        return;
+    }
+    $disk = PathResolver::toDisk($safe);
+    if ($disk === false || !is_file($disk)) {
+        $results[] = ['path' => $fused, 'ok' => false, 'msg' => 'file not found on any disk'];
+        return;
+    }
+    $jobs[$fused] = $disk;
+};
+
+foreach ($paths as $p) {
+    $safe = PathResolver::within($p, $base);
+    if ($safe === false) {
+        $results[] = ['path' => $p, 'ok' => false, 'msg' => 'outside base directory'];
+        continue;
+    }
+    // Same symlink guard as Toggle.php: chattr/unlink would act on whatever
+    // the symlink points at, possibly outside the sandbox.
+    if (is_link($safe)) {
+        $results[] = ['path' => $p, 'ok' => false, 'msg' => 'symlinks are not followed'];
+        continue;
+    }
+    if (is_dir($safe)) {
+        $dirIter = new RecursiveDirectoryIterator($safe, FilesystemIterator::SKIP_DOTS);
+        $filter  = new RecursiveCallbackFilterIterator($dirIter, fn($cur) => !$cur->isLink());
+        $it = new RecursiveIteratorIterator($filter);
+        foreach ($it as $f) {
+            if ($f->isFile()) $prepareFile($f->getPathname());
+        }
+    } else {
+        $prepareFile($safe);
+    }
+}
+
+// Unlock every job first, in batches (same pattern as Toggle.php): an
+// immutable file can't be unlinked, and batching keeps this fast when
+// deleting many files at once. If a batch as a whole fails (e.g. one bad
+// path in it), fall back to unlocking that batch's members individually so
+// one bad file doesn't leave the rest immutable and un-deletable.
+foreach (array_chunk($jobs, PathResolver::BATCH_SIZE, true) as $chunk) {
+    $args = implode(' ', array_map('escapeshellarg', $chunk));
+    $out = []; $rc = 0;
+    exec("chattr -i -- $args 2>&1", $out, $rc);
+    if ($rc !== 0) {
+        foreach ($chunk as $disk) {
+            $out2 = []; $rc2 = 0;
+            exec('chattr -i -- ' . escapeshellarg($disk) . ' 2>&1', $out2, $rc2);
+        }
+    }
+}
+
+// Delete. unlink()'s own success/failure is the source of truth here — no
+// need to branch on the chattr result above, since a file that was never
+// immutable (or lives on a filesystem chattr doesn't support) still deletes
+// normally, and one that's still stuck immutable will simply fail here.
+foreach ($jobs as $fused => $disk) {
+    if (@unlink($disk)) {
+        $results[] = ['path' => $fused, 'ok' => true, 'msg' => ''];
+    } else {
+        $results[] = ['path' => $fused, 'ok' => false, 'msg' => 'delete failed'];
+    }
+}
+
+filelock_json(['results' => $results]);
+]]>
+</INLINE>
+</FILE>
 <FILE Name="/usr/local/emhttp/plugins/file.lock/include/Search.php">
 <INLINE>
 <![CDATA[<?php
@@ -533,6 +657,7 @@ if ($csrf === '') {
     <button id="fl-search-clear" class="fl-btn" hidden>Clear</button>
     <button id="fl-lock"   class="fl-btn fl-lock"   disabled>Lock</button>
     <button id="fl-unlock" class="fl-btn fl-unlock" disabled>Unlock</button>
+    <button id="fl-delete" class="fl-btn fl-delete" disabled title="Remove the immutable flag, then permanently delete">Unlock &amp; Delete</button>
   </div>
 
   <table class="fl-table">
@@ -584,6 +709,7 @@ if ($csrf === '') {
   const upBtn  = document.getElementById('fl-up');
   const lockBtn   = document.getElementById('fl-lock');
   const unlockBtn = document.getElementById('fl-unlock');
+  const deleteBtn = document.getElementById('fl-delete');
   const allBox = document.getElementById('fl-all');
   const status = document.getElementById('fl-status');
   const searchInput    = document.getElementById('fl-search');
@@ -611,9 +737,10 @@ if ($csrf === '') {
 
   function refreshButtons() {
     const n = selected.size;
-    lockBtn.disabled = unlockBtn.disabled = (n === 0);
+    lockBtn.disabled = unlockBtn.disabled = deleteBtn.disabled = (n === 0);
     lockBtn.textContent   = n ? `Lock (${n})`   : 'Lock';
     unlockBtn.textContent = n ? `Unlock (${n})` : 'Unlock';
+    deleteBtn.textContent = n ? `Unlock & Delete (${n})` : 'Unlock & Delete';
   }
 
   /* --- rendering ------------------------------------------------------- */
@@ -786,7 +913,7 @@ if ($csrf === '') {
   function apply(action) {
     if (!selected.size) return;
     const paths = JSON.stringify([...selected]);
-    lockBtn.disabled = unlockBtn.disabled = true;
+    lockBtn.disabled = unlockBtn.disabled = deleteBtn.disabled = true;
     setMsg('Working…');
     post('Toggle.php', { action, paths }).then(res => {
       if (res.error) { setMsg(res.error, 'err'); return; }
@@ -801,11 +928,43 @@ if ($csrf === '') {
     }).catch(() => setMsg('Operation failed', 'err'));
   }
 
+  /** Unlock and permanently delete every selected file. Destructive and
+   *  irreversible, so it's gated behind an explicit confirm() prompt --
+   *  this is a UX safety net against fat-fingering the button, not an
+   *  access control: anyone who can reach this page could already delete
+   *  these files locking/unlocking them manually. */
+  function doDelete() {
+    if (!selected.size) return;
+    const n = selected.size;
+    const ok = confirm(
+      `Permanently delete ${n} item(s)?\n\n` +
+      `This removes the immutable flag first, then deletes the file(s) ` +
+      `-- selected folders are deleted recursively. This cannot be undone.`
+    );
+    if (!ok) return;
+
+    const paths = JSON.stringify([...selected]);
+    lockBtn.disabled = unlockBtn.disabled = deleteBtn.disabled = true;
+    setMsg('Deleting…');
+    post('Delete.php', { paths }).then(res => {
+      if (res.error) { setMsg(res.error, 'err'); return; }
+      const fail = res.results.filter(r => !r.ok);
+      const done = res.results.length - fail.length;
+      if (fail.length) {
+        setMsg(`${done} deleted, ${fail.length} failed (e.g. ${fail[0].msg})`, 'err');
+      } else {
+        setMsg(`Deleted ${done} file(s).`, 'ok');
+      }
+      refresh();
+    }).catch(() => setMsg('Delete failed', 'err'));
+  }
+
   /* --- wire up --------------------------------------------------------- */
 
   upBtn.onclick     = () => { if (parent !== null) load(parent); };
   lockBtn.onclick   = () => apply('lock');
   unlockBtn.onclick = () => apply('unlock');
+  deleteBtn.onclick = doDelete;
 
   allBox.onchange = () => {
     list.querySelectorAll('input[type=checkbox]').forEach(cb => {
@@ -863,9 +1022,15 @@ if ($csrf === '') {
 }
 .fl-btn:disabled { opacity: .45; cursor: default; }
 /* Fixed width so the "(n)" count never resizes the button or wraps the bar. */
-.fl-lock, .fl-unlock { min-width: 96px; text-align: center; }
+.fl-lock, .fl-unlock, .fl-delete { min-width: 96px; text-align: center; }
 .fl-lock:not(:disabled)   { border-color: #2e7d32; color: #2e7d32; }
 .fl-unlock:not(:disabled) { border-color: #c62828; color: #c62828; }
+/* Filled, not just outlined, so Delete doesn't read as just another
+   lock/unlock toggle -- it's a destructive, irreversible action. */
+.fl-delete:not(:disabled) {
+  border-color: #b71c1c; background: #b71c1c; color: #fff;
+}
+.fl-delete:not(:disabled):hover { background: #8e1515; border-color: #8e1515; }
 
 .fl-crumbs { font-size: 14px; }
 .fl-crumbs a { text-decoration: none; }
@@ -927,7 +1092,7 @@ mkdir -p /boot/config/plugins/file.lock
 [ -f /boot/config/plugins/file.lock/file.lock.cfg ] || echo 'BASEDIR="/mnt/user/media/video"' > /boot/config/plugins/file.lock/file.lock.cfg
 chmod -R 755 /usr/local/emhttp/plugins/file.lock
 echo ""
-echo "File Lock 2026.09.13 installed. Open it under Tools in the webGUI."
+echo "File Lock 2026.09.14 installed. Open it under Tools in the webGUI."
 echo ""
 </INLINE>
 </FILE>

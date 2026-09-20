@@ -15,36 +15,39 @@ class PathResolver {
     /** Directory names directly under /mnt that are NOT array disks or pools. */
     const RESERVED = ['user', 'user0', 'disks', 'remotes', 'addons', 'rootshare'];
 
-    /** Per-request cache for diskRoots(), which is otherwise re-globbed constantly. */
-    private static ?array $diskRootsCache = null;
+    /** Per-request cache for diskRoots(), which is otherwise re-globbed constantly. Keyed by $mnt. */
+    private static array $diskRootsCache = [];
 
     /**
      * Physical mount roots that can back a user share: array disks + pools.
      * e.g. ['/mnt/disk1', '/mnt/disk2', '/mnt/cache'].
+     *
+     * $mnt is injectable (defaults to the real '/mnt') purely so tests can
+     * point this at a throwaway fixture tree instead of the live array.
      */
-    public static function diskRoots(): array {
-        if (self::$diskRootsCache !== null) return self::$diskRootsCache;
+    public static function diskRoots(string $mnt = '/mnt'): array {
+        if (isset(self::$diskRootsCache[$mnt])) return self::$diskRootsCache[$mnt];
 
         $roots = [];
 
-        // Array data disks: /mnt/disk1, /mnt/disk2, ...
-        foreach (glob('/mnt/disk[0-9]*', GLOB_ONLYDIR) as $d) {
+        // Array data disks: $mnt/disk1, $mnt/disk2, ...
+        foreach (glob("$mnt/disk[0-9]*", GLOB_ONLYDIR) as $d) {
             $roots[] = $d;
         }
 
-        // Pools (cache and any named pool): everything else under /mnt that
+        // Pools (cache and any named pool): everything else under $mnt that
         // isn't reserved and isn't an array disk we already added.
-        foreach (glob('/mnt/*', GLOB_ONLYDIR) as $m) {
+        foreach (glob("$mnt/*", GLOB_ONLYDIR) as $m) {
             $name = basename($m);
             if (in_array($name, self::RESERVED, true)) continue;
             if (preg_match('/^disk[0-9]+$/', $name)) continue;
             $roots[] = $m;
         }
 
-        return self::$diskRootsCache = $roots;
+        return self::$diskRootsCache[$mnt] = $roots;
     }
 
-    /** Per-request cache for resolveDir(): fused directory -> [filename => diskPath]. */
+    /** Per-request cache for resolveDir(): [$mnt][fused directory] -> [filename => diskPath]. */
     private static array $dirCache = [];
 
     /**
@@ -59,14 +62,14 @@ class PathResolver {
      * since callers (e.g. Browse.php's per-entry lookup, or a recursive
      * Toggle.php walk) commonly resolve many files from the same directory.
      */
-    public static function resolveDir(string $fusedDir): array {
+    public static function resolveDir(string $fusedDir, string $mnt = '/mnt'): array {
         $fusedDir = self::clean($fusedDir);
-        if (isset(self::$dirCache[$fusedDir])) return self::$dirCache[$fusedDir];
+        if (isset(self::$dirCache[$mnt][$fusedDir])) return self::$dirCache[$mnt][$fusedDir];
 
         $map = [];
         if (preg_match('#^/mnt/user0?/(.*)$#', $fusedDir, $m)) {
             $rel = $m[1];
-            foreach (self::diskRoots() as $root) {
+            foreach (self::diskRoots($mnt) as $root) {
                 $cand = $rel === '' ? $root : $root . '/' . $rel;
                 if (!is_dir($cand)) continue;
                 $dh = @opendir($cand);
@@ -78,7 +81,7 @@ class PathResolver {
                 closedir($dh);
             }
         }
-        return self::$dirCache[$fusedDir] = $map;
+        return self::$dirCache[$mnt][$fusedDir] = $map;
     }
 
     /**
@@ -88,14 +91,14 @@ class PathResolver {
      * If the path isn't a /mnt/user(0) path it's assumed to already be physical
      * and is returned unchanged.
      */
-    public static function toDisk(string $fused) {
+    public static function toDisk(string $fused, string $mnt = '/mnt') {
         $fused = self::clean($fused);
 
         if (!preg_match('#^/mnt/user0?/(.+)$#', $fused)) {
             return $fused; // not a user-share path; treat as already physical
         }
 
-        $map = self::resolveDir(dirname($fused));
+        $map = self::resolveDir(dirname($fused), $mnt);
         return $map[basename($fused)] ?? false;
     }
 
@@ -158,11 +161,24 @@ class PathResolver {
             $out = []; $rc = 0;
             exec("lsattr -d -- $args 2>/dev/null", $out, $rc);
             foreach ($out as $line) {
-                // Output per path looks like: "----i---------e----- /mnt/disk1/share/file.jpg"
-                if (!preg_match('/^(\S+)\s+(.*)$/', $line, $m)) continue;
-                $status[$m[2]] = strpos($m[1], 'i') !== false;
+                $parsed = self::parseLsattrLine($line);
+                if ($parsed === null) continue;
+                [$path, $immutable] = $parsed;
+                $status[$path] = $immutable;
             }
         }
         return $status;
+    }
+
+    /**
+     * Parse one line of `lsattr -d` output, e.g.
+     * "----i---------e----- /mnt/disk1/share/file.jpg".
+     * Returns [diskPath, immutable] or null if the line doesn't match the
+     * expected shape (kept separate from isImmutableBatch so it's testable
+     * without actually shelling out to lsattr).
+     */
+    public static function parseLsattrLine(string $line): ?array {
+        if (!preg_match('/^(\S+)\s+(.*)$/', $line, $m)) return null;
+        return [$m[2], strpos($m[1], 'i') !== false];
     }
 }

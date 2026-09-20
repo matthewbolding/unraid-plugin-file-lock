@@ -16,6 +16,7 @@
   const upBtn  = document.getElementById('fl-up');
   const lockBtn   = document.getElementById('fl-lock');
   const unlockBtn = document.getElementById('fl-unlock');
+  const deleteBtn = document.getElementById('fl-delete');
   const allBox = document.getElementById('fl-all');
   const status = document.getElementById('fl-status');
   const searchInput    = document.getElementById('fl-search');
@@ -43,9 +44,10 @@
 
   function refreshButtons() {
     const n = selected.size;
-    lockBtn.disabled = unlockBtn.disabled = (n === 0);
+    lockBtn.disabled = unlockBtn.disabled = deleteBtn.disabled = (n === 0);
     lockBtn.textContent   = n ? `Lock (${n})`   : 'Lock';
     unlockBtn.textContent = n ? `Unlock (${n})` : 'Unlock';
+    deleteBtn.textContent = n ? `Unlock & Delete (${n})` : 'Unlock & Delete';
   }
 
   /* --- rendering ------------------------------------------------------- */
@@ -218,7 +220,7 @@
   function apply(action) {
     if (!selected.size) return;
     const paths = JSON.stringify([...selected]);
-    lockBtn.disabled = unlockBtn.disabled = true;
+    lockBtn.disabled = unlockBtn.disabled = deleteBtn.disabled = true;
     setMsg('Working…');
     post('Toggle.php', { action, paths }).then(res => {
       if (res.error) { setMsg(res.error, 'err'); return; }
@@ -233,11 +235,43 @@
     }).catch(() => setMsg('Operation failed', 'err'));
   }
 
+  /** Unlock and permanently delete every selected file. Destructive and
+   *  irreversible, so it's gated behind an explicit confirm() prompt --
+   *  this is a UX safety net against fat-fingering the button, not an
+   *  access control: anyone who can reach this page could already delete
+   *  these files locking/unlocking them manually. */
+  function doDelete() {
+    if (!selected.size) return;
+    const n = selected.size;
+    const ok = confirm(
+      `Permanently delete ${n} item(s)?\n\n` +
+      `This removes the immutable flag first, then deletes the file(s) ` +
+      `-- selected folders are deleted recursively. This cannot be undone.`
+    );
+    if (!ok) return;
+
+    const paths = JSON.stringify([...selected]);
+    lockBtn.disabled = unlockBtn.disabled = deleteBtn.disabled = true;
+    setMsg('Deleting…');
+    post('Delete.php', { paths }).then(res => {
+      if (res.error) { setMsg(res.error, 'err'); return; }
+      const fail = res.results.filter(r => !r.ok);
+      const done = res.results.length - fail.length;
+      if (fail.length) {
+        setMsg(`${done} deleted, ${fail.length} failed (e.g. ${fail[0].msg})`, 'err');
+      } else {
+        setMsg(`Deleted ${done} file(s).`, 'ok');
+      }
+      refresh();
+    }).catch(() => setMsg('Delete failed', 'err'));
+  }
+
   /* --- wire up --------------------------------------------------------- */
 
   upBtn.onclick     = () => { if (parent !== null) load(parent); };
   lockBtn.onclick   = () => apply('lock');
   unlockBtn.onclick = () => apply('unlock');
+  deleteBtn.onclick = doDelete;
 
   allBox.onchange = () => {
     list.querySelectorAll('input[type=checkbox]').forEach(cb => {

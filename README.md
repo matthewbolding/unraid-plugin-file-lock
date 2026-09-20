@@ -7,6 +7,7 @@ A webGUI page to apply or remove the immutable flag (`chattr +i` / `chattr -i`) 
 - Click a folder to navigate into it; click the checkbox to select it. Selecting a **folder** and hitting Lock/Unlock applies the flag to **every file inside it, recursively** (directories themselves can't be made immutable).
 - The search box finds files/folders by name anywhere under the current folder, not just the current listing.
 - The browser is sandboxed to a configurable **base directory** and below.
+- **Unlock & Delete** removes the immutable flag (if set) and permanently deletes the selected file(s); a folder's contents are deleted recursively. This is irreversible and gated behind a confirmation prompt — see Caveats below.
 
 The webGUI shows **fused** paths (`/mnt/user/...`); the backend resolves each file to its **physical** disk path (`/mnt/disk2/...`, `/mnt/cache/...`) before running `chattr`, because the shfs FUSE layer that presents `/mnt/user` doesn't implement the ioctls `chattr`/`lsattr` need.
 
@@ -74,11 +75,22 @@ chmod -R 755 /usr/local/emhttp/plugins/file.lock
 
 Then open **Tools → File Lock** in the webGUI and hard-refresh after each edit. If you're editing over a code-server / VS Code container, map `/usr/local/emhttp/plugins` into it, or edit on a share and re-run the extract command above.
 
+## Testing
+
+`tests/` covers the sandboxing and path-resolution logic in `include/PathResolver.php` (fused-path cleaning, the `within()` traversal guard, fused-to-disk resolution, and `lsattr` output parsing) with a small dependency-free harness — no PHPUnit/Composer, matching the zero-dependency approach `build.py` already takes. The disk-resolution tests point at a throwaway temp directory rather than the real `/mnt`, so they never touch actual array data. Run them with:
+
+```bash
+php tests/run.php
+```
+
+`Browse.php`/`Toggle.php`/`Delete.php`/`Search.php`/`Settings.php` aren't covered here — they're thin AJAX endpoints over `$_POST`, real disk I/O, and the live config file, so they're better exercised by hand through the webGUI than mocked in a unit test.
+
 ## Caveats
 
 - **Mover interaction:** an immutable file on cache or a pool storage can't be moved or deleted until `+i` is removed. The mover will therefore skip locked files.
 - **Immutable is absolute:** while `+i` is set no entity or user, including the root user, Docker, SMB clients, etc., can modify, rename, or delete the file. Any app trying to write to a locked file will likewise get a permission error.
 - **Recursive folder operations** batch `chattr` in chunks rather than one subprocess per file, but a large enough tree can still hit PHP's execution time limit. See "Known issues" below.
+- **Unlock & Delete is permanent.** There's no recycle bin or undo. The confirmation prompt before deleting is a UX safety net against misclicks, not an access control — anyone who can reach the webGUI could already delete these files by unlocking them and deleting manually, so it changes nothing about who can do what, only how easy it is to do by accident.
 - **Access control** is not per-user: anyone who can reach the webGUI can lock/unlock anything within the configured base directory.
 - **Hardlinks:** `+i` is an inode attribute, so every hardlink to a file reflects the same locked state.
 
