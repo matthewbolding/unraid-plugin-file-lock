@@ -35,9 +35,20 @@ file.lock/
 
 ## Install
 
+**From the published `.plg` (recommended):** in the webGUI, **Plugins → Install Plugin**, and paste:
+```
+https://raw.githubusercontent.com/matthewbolding/unraid-plugin-file-lock/master/file.lock.plg
+```
+Or from a terminal:
+```bash
+plugin install https://raw.githubusercontent.com/matthewbolding/unraid-plugin-file-lock/master/file.lock.plg
+```
+
+**From source**, e.g. to test a local change:
+
 1. Build the installer from source:
    ```bash
-   python3 build.py file.lock file.lock.plg
+   python3 build.py . file.lock.plg
    ```
 2. Copy `file.lock.plg` to `/boot/config/plugins/` on the flash drive.
 3. Install it — either in the webGUI (**Plugins → Install Plugin**, paste `/boot/config/plugins/file.lock.plg`) or from a terminal:
