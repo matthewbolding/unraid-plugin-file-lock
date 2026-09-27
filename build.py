@@ -58,7 +58,7 @@ mkdir -p /boot/config/plugins/{PLUGIN}
 [ -f /boot/config/plugins/{PLUGIN}/{PLUGIN}.cfg ] || echo 'BASEDIR="/mnt/user/media/video"' > /boot/config/plugins/{PLUGIN}/{PLUGIN}.cfg
 chmod -R 755 {DEST}
 echo ""
-echo "File Lock {VERSION} installed. Open it under Tools in the webGUI."
+echo "File Lock {VERSION} installed. Open it under Settings in the webGUI."
 echo ""
 </INLINE>
 </FILE>
@@ -82,7 +82,7 @@ plg = f'''<?xml version='1.0' standalone='yes'?>
 <!ENTITY author    "{AUTHOR}">
 <!ENTITY version   "{VERSION}">
 <!ENTITY pluginURL "{PLUGIN_URL}">
-<!ENTITY launch    "Tools/FileLock">
+<!ENTITY launch    "Settings/file.lock">
 ]>
 
 <PLUGIN name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;" launch="&launch;">

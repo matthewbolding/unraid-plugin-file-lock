@@ -15,7 +15,7 @@ The webGUI shows **fused** paths (`/mnt/user/...`); the backend resolves each fi
 
 ```
 file.lock/
-├── file.lock.page              webGUI page (Tools → File Lock)
+├── file.lock.page              webGUI page (Settings → Utilities → File Lock)
 ├── include/
 │   ├── PathResolver.php         fused <-> disk path mapping + immutable check
 │   ├── common.php               config loader
@@ -73,7 +73,7 @@ tar -xzf file.lock-source.tar.gz -C /usr/local/emhttp/plugins/
 chmod -R 755 /usr/local/emhttp/plugins/file.lock
 ```
 
-Then open **Tools → File Lock** in the webGUI and hard-refresh after each edit. If you're editing over a code-server / VS Code container, map `/usr/local/emhttp/plugins` into it, or edit on a share and re-run the extract command above.
+Then open **Settings → File Lock** in the webGUI and hard-refresh after each edit. If you're editing over a code-server / VS Code container, map `/usr/local/emhttp/plugins` into it, or edit on a share and re-run the extract command above.
 
 ## Testing
 
