@@ -2,15 +2,15 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "file.lock">
 <!ENTITY author    "Matthew Bolding">
-<!ENTITY version   "2026.09.14">
+<!ENTITY version   "2026.09.27">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/matthewbolding/unraid-plugin-file-lock/master/file.lock.plg">
-<!ENTITY launch    "Tools/FileLock">
+<!ENTITY launch    "Settings/file.lock">
 ]>
 
 <PLUGIN name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;" launch="&launch;">
 
 <CHANGES>
-### 2026.09.14
+### 2026.09.27
 - Built from source.
 </CHANGES>
 
@@ -628,7 +628,10 @@ Icon="lock"
 Tag="lock"
 ---
 <?php
-/* file.lock.page — renders under Tools / Utilities in the Unraid webGUI. */
+/* file.lock.page — renders under Settings / Utilities in the Unraid webGUI
+ * (Menu="Utilities" is owned by dynamix/Utilities.page, whose own Menu is
+ * "Settings" -- there is no Tools-tab equivalent, despite what an earlier
+ * version of this comment and the .plg's launch= attribute assumed). */
 require_once '/usr/local/emhttp/plugins/file.lock/include/common.php';
 $conf = filelock_config();
 $base = $conf['base'];
@@ -1092,7 +1095,7 @@ mkdir -p /boot/config/plugins/file.lock
 [ -f /boot/config/plugins/file.lock/file.lock.cfg ] || echo 'BASEDIR="/mnt/user/media/video"' > /boot/config/plugins/file.lock/file.lock.cfg
 chmod -R 755 /usr/local/emhttp/plugins/file.lock
 echo ""
-echo "File Lock 2026.09.14 installed. Open it under Tools in the webGUI."
+echo "File Lock 2026.09.27 installed. Open it under Settings in the webGUI."
 echo ""
 </INLINE>
 </FILE>

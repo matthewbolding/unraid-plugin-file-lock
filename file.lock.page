@@ -4,7 +4,10 @@ Icon="lock"
 Tag="lock"
 ---
 <?php
-/* file.lock.page — renders under Tools / Utilities in the Unraid webGUI. */
+/* file.lock.page — renders under Settings / Utilities in the Unraid webGUI
+ * (Menu="Utilities" is owned by dynamix/Utilities.page, whose own Menu is
+ * "Settings" -- there is no Tools-tab equivalent, despite what an earlier
+ * version of this comment and the .plg's launch= attribute assumed). */
 require_once '/usr/local/emhttp/plugins/file.lock/include/common.php';
 $conf = filelock_config();
 $base = $conf['base'];
