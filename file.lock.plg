@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "file.lock">
 <!ENTITY author    "Matthew Bolding">
-<!ENTITY version   "2026.09.27">
+<!ENTITY version   "2026.09.30">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/matthewbolding/unraid-plugin-file-lock/master/file.lock.plg">
 <!ENTITY launch    "Settings/file.lock">
 ]>
@@ -10,7 +10,7 @@
 <PLUGIN name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;" launch="&launch;">
 
 <CHANGES>
-### 2026.09.27
+### 2026.09.30
 - Built from source.
 </CHANGES>
 
@@ -407,7 +407,7 @@ filelock_json(['action' => $action, 'results' => $results]);
  * Delete.php — unlock (remove the immutable flag, if set) and permanently
  * delete the selected files.
  *
- * POST: paths (JSON array of fused paths), csrf_token
+ * POST: paths (JSON array of fused file paths), csrf_token
  * Returns JSON: { results:[{path,ok,msg}] }
  *
  * This is destructive and irreversible, unlike Toggle.php's lock/unlock.
@@ -417,10 +417,15 @@ filelock_json(['action' => $action, 'results' => $results]);
  * directory checks below), so it must never be wired up to fire without
  * that prompt having already been shown and accepted.
  *
- * Directories cannot themselves be immutable and are never deleted here —
- * only regular files, matching Toggle.php's recursive-into-a-folder
- * semantics. A selected folder's contents are unlocked and deleted
- * recursively; the (now possibly empty) folder itself is left in place.
+ * Files only: a selected directory is rejected rather than recursed into.
+ * (An earlier version did recurse, deleting every file inside a folder but
+ * never the folder itself, which looked like "nothing happened" once the
+ * now-empty/partly-emptied folder was still sitting right there. Since
+ * directories can't be made immutable in the first place, there's no
+ * "unlock" half of "unlock & delete" for one anyway -- restricting this to
+ * files keeps the button's behavior unambiguous.) The front end disables
+ * the button whenever a folder is selected; this check is the real
+ * enforcement, in case this endpoint is ever reached some other way.
  */
 
 require_once __DIR__ . '/common.php';
@@ -436,43 +441,28 @@ if (!is_array($paths)) {
 $results = [];
 $jobs    = []; // fused file path => disk path, resolved files waiting for unlock+delete
 
-/** Resolve a single fused file path to its disk path, or record why it can't be done. */
-$prepareFile = function (string $fused) use (&$results, &$jobs, $base) {
-    $safe = PathResolver::within($fused, $base);
-    if ($safe === false) {
-        $results[] = ['path' => $fused, 'ok' => false, 'msg' => 'outside base directory'];
-        return;
-    }
-    $disk = PathResolver::toDisk($safe);
-    if ($disk === false || !is_file($disk)) {
-        $results[] = ['path' => $fused, 'ok' => false, 'msg' => 'file not found on any disk'];
-        return;
-    }
-    $jobs[$fused] = $disk;
-};
-
 foreach ($paths as $p) {
     $safe = PathResolver::within($p, $base);
     if ($safe === false) {
         $results[] = ['path' => $p, 'ok' => false, 'msg' => 'outside base directory'];
         continue;
     }
-    // Same symlink guard as Toggle.php: chattr/unlink would act on whatever
-    // the symlink points at, possibly outside the sandbox.
+    // chattr/unlink would act on whatever a symlink points at, possibly
+    // outside the sandbox -- same guard as Toggle.php.
     if (is_link($safe)) {
         $results[] = ['path' => $p, 'ok' => false, 'msg' => 'symlinks are not followed'];
         continue;
     }
     if (is_dir($safe)) {
-        $dirIter = new RecursiveDirectoryIterator($safe, FilesystemIterator::SKIP_DOTS);
-        $filter  = new RecursiveCallbackFilterIterator($dirIter, fn($cur) => !$cur->isLink());
-        $it = new RecursiveIteratorIterator($filter);
-        foreach ($it as $f) {
-            if ($f->isFile()) $prepareFile($f->getPathname());
-        }
-    } else {
-        $prepareFile($safe);
+        $results[] = ['path' => $p, 'ok' => false, 'msg' => 'folders are not supported -- select individual files'];
+        continue;
     }
+    $disk = PathResolver::toDisk($safe);
+    if ($disk === false || !is_file($disk)) {
+        $results[] = ['path' => $p, 'ok' => false, 'msg' => 'file not found on any disk'];
+        continue;
+    }
+    $jobs[$p] = $disk;
 }
 
 // Unlock every job first, in batches (same pattern as Toggle.php): an
@@ -723,7 +713,8 @@ if ($csrf === '') {
   let searchActive = false;
   let lastQuery    = '';
   let searchTimer  = null;
-  const selected = new Set();
+  const selected    = new Set();
+  const selectedDirs = new Set(); // subset of `selected` that are folders -- Delete is files-only
 
   /* --- helpers --------------------------------------------------------- */
 
@@ -740,10 +731,15 @@ if ($csrf === '') {
 
   function refreshButtons() {
     const n = selected.size;
-    lockBtn.disabled = unlockBtn.disabled = deleteBtn.disabled = (n === 0);
+    const hasDir = selectedDirs.size > 0;
+    lockBtn.disabled   = unlockBtn.disabled = (n === 0);
+    deleteBtn.disabled = (n === 0) || hasDir;
     lockBtn.textContent   = n ? `Lock (${n})`   : 'Lock';
     unlockBtn.textContent = n ? `Unlock (${n})` : 'Unlock';
     deleteBtn.textContent = n ? `Unlock & Delete (${n})` : 'Unlock & Delete';
+    deleteBtn.title = hasDir
+      ? 'Folders are not supported for delete -- select individual files'
+      : 'Remove the immutable flag, then permanently delete';
   }
 
   /* --- rendering ------------------------------------------------------- */
@@ -784,7 +780,13 @@ if ($csrf === '') {
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.onchange = () => {
-      cb.checked ? selected.add(en.path) : selected.delete(en.path);
+      if (cb.checked) {
+        selected.add(en.path);
+        if (en.dir) selectedDirs.add(en.path);
+      } else {
+        selected.delete(en.path);
+        selectedDirs.delete(en.path);
+      }
       tr.classList.toggle('fl-selected', cb.checked);
       refreshButtons();
     };
@@ -846,6 +848,7 @@ if ($csrf === '') {
     current = data.path;
     parent  = data.parent;
     selected.clear();
+    selectedDirs.clear();
     allBox.checked = false;
     upBtn.disabled = (parent === null);
     renderCrumbs();
@@ -863,6 +866,7 @@ if ($csrf === '') {
   function renderSearch(data) {
     if (data.error) { setMsg(data.error, 'err'); return; }
     selected.clear();
+    selectedDirs.clear();
     allBox.checked = false;
     refreshButtons();
 
@@ -931,18 +935,20 @@ if ($csrf === '') {
     }).catch(() => setMsg('Operation failed', 'err'));
   }
 
-  /** Unlock and permanently delete every selected file. Destructive and
-   *  irreversible, so it's gated behind an explicit confirm() prompt --
-   *  this is a UX safety net against fat-fingering the button, not an
-   *  access control: anyone who can reach this page could already delete
-   *  these files locking/unlocking them manually. */
+  /** Unlock and permanently delete every selected file. Files only -- the
+   *  button is disabled whenever a folder is selected (Delete.php enforces
+   *  the same rule server-side). Destructive and irreversible, so it's
+   *  gated behind an explicit confirm() prompt -- a UX safety net against
+   *  fat-fingering the button, not an access control: anyone who can reach
+   *  this page could already delete these files by locking/unlocking them
+   *  manually. */
   function doDelete() {
-    if (!selected.size) return;
+    if (!selected.size || selectedDirs.size) return;
     const n = selected.size;
     const ok = confirm(
-      `Permanently delete ${n} item(s)?\n\n` +
-      `This removes the immutable flag first, then deletes the file(s) ` +
-      `-- selected folders are deleted recursively. This cannot be undone.`
+      `Permanently delete ${n} file(s)?\n\n` +
+      `This removes the immutable flag first, then deletes the file(s). ` +
+      `This cannot be undone.`
     );
     if (!ok) return;
 
@@ -1095,7 +1101,7 @@ mkdir -p /boot/config/plugins/file.lock
 [ -f /boot/config/plugins/file.lock/file.lock.cfg ] || echo 'BASEDIR="/mnt/user/media/video"' > /boot/config/plugins/file.lock/file.lock.cfg
 chmod -R 755 /usr/local/emhttp/plugins/file.lock
 echo ""
-echo "File Lock 2026.09.27 installed. Open it under Settings in the webGUI."
+echo "File Lock 2026.09.30 installed. Open it under Settings in the webGUI."
 echo ""
 </INLINE>
 </FILE>

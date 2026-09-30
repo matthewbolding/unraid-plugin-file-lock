@@ -27,7 +27,8 @@
   let searchActive = false;
   let lastQuery    = '';
   let searchTimer  = null;
-  const selected = new Set();
+  const selected    = new Set();
+  const selectedDirs = new Set(); // subset of `selected` that are folders -- Delete is files-only
 
   /* --- helpers --------------------------------------------------------- */
 
@@ -44,10 +45,15 @@
 
   function refreshButtons() {
     const n = selected.size;
-    lockBtn.disabled = unlockBtn.disabled = deleteBtn.disabled = (n === 0);
+    const hasDir = selectedDirs.size > 0;
+    lockBtn.disabled   = unlockBtn.disabled = (n === 0);
+    deleteBtn.disabled = (n === 0) || hasDir;
     lockBtn.textContent   = n ? `Lock (${n})`   : 'Lock';
     unlockBtn.textContent = n ? `Unlock (${n})` : 'Unlock';
     deleteBtn.textContent = n ? `Unlock & Delete (${n})` : 'Unlock & Delete';
+    deleteBtn.title = hasDir
+      ? 'Folders are not supported for delete -- select individual files'
+      : 'Remove the immutable flag, then permanently delete';
   }
 
   /* --- rendering ------------------------------------------------------- */
@@ -88,7 +94,13 @@
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.onchange = () => {
-      cb.checked ? selected.add(en.path) : selected.delete(en.path);
+      if (cb.checked) {
+        selected.add(en.path);
+        if (en.dir) selectedDirs.add(en.path);
+      } else {
+        selected.delete(en.path);
+        selectedDirs.delete(en.path);
+      }
       tr.classList.toggle('fl-selected', cb.checked);
       refreshButtons();
     };
@@ -150,6 +162,7 @@
     current = data.path;
     parent  = data.parent;
     selected.clear();
+    selectedDirs.clear();
     allBox.checked = false;
     upBtn.disabled = (parent === null);
     renderCrumbs();
@@ -167,6 +180,7 @@
   function renderSearch(data) {
     if (data.error) { setMsg(data.error, 'err'); return; }
     selected.clear();
+    selectedDirs.clear();
     allBox.checked = false;
     refreshButtons();
 
@@ -235,18 +249,20 @@
     }).catch(() => setMsg('Operation failed', 'err'));
   }
 
-  /** Unlock and permanently delete every selected file. Destructive and
-   *  irreversible, so it's gated behind an explicit confirm() prompt --
-   *  this is a UX safety net against fat-fingering the button, not an
-   *  access control: anyone who can reach this page could already delete
-   *  these files locking/unlocking them manually. */
+  /** Unlock and permanently delete every selected file. Files only -- the
+   *  button is disabled whenever a folder is selected (Delete.php enforces
+   *  the same rule server-side). Destructive and irreversible, so it's
+   *  gated behind an explicit confirm() prompt -- a UX safety net against
+   *  fat-fingering the button, not an access control: anyone who can reach
+   *  this page could already delete these files by locking/unlocking them
+   *  manually. */
   function doDelete() {
-    if (!selected.size) return;
+    if (!selected.size || selectedDirs.size) return;
     const n = selected.size;
     const ok = confirm(
-      `Permanently delete ${n} item(s)?\n\n` +
-      `This removes the immutable flag first, then deletes the file(s) ` +
-      `-- selected folders are deleted recursively. This cannot be undone.`
+      `Permanently delete ${n} file(s)?\n\n` +
+      `This removes the immutable flag first, then deletes the file(s). ` +
+      `This cannot be undone.`
     );
     if (!ok) return;
 

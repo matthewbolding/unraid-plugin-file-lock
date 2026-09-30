@@ -3,7 +3,7 @@
  * Delete.php — unlock (remove the immutable flag, if set) and permanently
  * delete the selected files.
  *
- * POST: paths (JSON array of fused paths), csrf_token
+ * POST: paths (JSON array of fused file paths), csrf_token
  * Returns JSON: { results:[{path,ok,msg}] }
  *
  * This is destructive and irreversible, unlike Toggle.php's lock/unlock.
@@ -13,10 +13,15 @@
  * directory checks below), so it must never be wired up to fire without
  * that prompt having already been shown and accepted.
  *
- * Directories cannot themselves be immutable and are never deleted here —
- * only regular files, matching Toggle.php's recursive-into-a-folder
- * semantics. A selected folder's contents are unlocked and deleted
- * recursively; the (now possibly empty) folder itself is left in place.
+ * Files only: a selected directory is rejected rather than recursed into.
+ * (An earlier version did recurse, deleting every file inside a folder but
+ * never the folder itself, which looked like "nothing happened" once the
+ * now-empty/partly-emptied folder was still sitting right there. Since
+ * directories can't be made immutable in the first place, there's no
+ * "unlock" half of "unlock & delete" for one anyway -- restricting this to
+ * files keeps the button's behavior unambiguous.) The front end disables
+ * the button whenever a folder is selected; this check is the real
+ * enforcement, in case this endpoint is ever reached some other way.
  */
 
 require_once __DIR__ . '/common.php';
@@ -32,43 +37,28 @@ if (!is_array($paths)) {
 $results = [];
 $jobs    = []; // fused file path => disk path, resolved files waiting for unlock+delete
 
-/** Resolve a single fused file path to its disk path, or record why it can't be done. */
-$prepareFile = function (string $fused) use (&$results, &$jobs, $base) {
-    $safe = PathResolver::within($fused, $base);
-    if ($safe === false) {
-        $results[] = ['path' => $fused, 'ok' => false, 'msg' => 'outside base directory'];
-        return;
-    }
-    $disk = PathResolver::toDisk($safe);
-    if ($disk === false || !is_file($disk)) {
-        $results[] = ['path' => $fused, 'ok' => false, 'msg' => 'file not found on any disk'];
-        return;
-    }
-    $jobs[$fused] = $disk;
-};
-
 foreach ($paths as $p) {
     $safe = PathResolver::within($p, $base);
     if ($safe === false) {
         $results[] = ['path' => $p, 'ok' => false, 'msg' => 'outside base directory'];
         continue;
     }
-    // Same symlink guard as Toggle.php: chattr/unlink would act on whatever
-    // the symlink points at, possibly outside the sandbox.
+    // chattr/unlink would act on whatever a symlink points at, possibly
+    // outside the sandbox -- same guard as Toggle.php.
     if (is_link($safe)) {
         $results[] = ['path' => $p, 'ok' => false, 'msg' => 'symlinks are not followed'];
         continue;
     }
     if (is_dir($safe)) {
-        $dirIter = new RecursiveDirectoryIterator($safe, FilesystemIterator::SKIP_DOTS);
-        $filter  = new RecursiveCallbackFilterIterator($dirIter, fn($cur) => !$cur->isLink());
-        $it = new RecursiveIteratorIterator($filter);
-        foreach ($it as $f) {
-            if ($f->isFile()) $prepareFile($f->getPathname());
-        }
-    } else {
-        $prepareFile($safe);
+        $results[] = ['path' => $p, 'ok' => false, 'msg' => 'folders are not supported -- select individual files'];
+        continue;
     }
+    $disk = PathResolver::toDisk($safe);
+    if ($disk === false || !is_file($disk)) {
+        $results[] = ['path' => $p, 'ok' => false, 'msg' => 'file not found on any disk'];
+        continue;
+    }
+    $jobs[$p] = $disk;
 }
 
 // Unlock every job first, in batches (same pattern as Toggle.php): an

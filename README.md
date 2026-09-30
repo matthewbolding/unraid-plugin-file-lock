@@ -7,7 +7,7 @@ A webGUI page to apply or remove the immutable flag (`chattr +i` / `chattr -i`) 
 - Click a folder to navigate into it; click the checkbox to select it. Selecting a **folder** and hitting Lock/Unlock applies the flag to **every file inside it, recursively** (directories themselves can't be made immutable).
 - The search box finds files/folders by name anywhere under the current folder, not just the current listing.
 - The browser is sandboxed to a configurable **base directory** and below.
-- **Unlock & Delete** removes the immutable flag (if set) and permanently deletes the selected file(s); a folder's contents are deleted recursively. This is irreversible and gated behind a confirmation prompt — see Caveats below.
+- **Unlock & Delete** removes the immutable flag (if set) and permanently deletes the selected file(s). Files only — the button is disabled whenever a folder is selected. This is irreversible and gated behind a confirmation prompt — see Caveats below.
 
 The webGUI shows **fused** paths (`/mnt/user/...`); the backend resolves each file to its **physical** disk path (`/mnt/disk2/...`, `/mnt/cache/...`) before running `chattr`, because the shfs FUSE layer that presents `/mnt/user` doesn't implement the ioctls `chattr`/`lsattr` need.
 
